@@ -1,0 +1,16 @@
+name: napari-multiplex-thresholder
+display_name: Multiplex thresholder
+
+contributions:
+  commands:
+    - id: napari-multiplex-thresholder.gating_controls
+      title: Manual gating controls (+ KDE dock)
+      # A CLASS, not a factory function. napari only injects the viewer into class
+      # contributions (a parameter named `napari_viewer`, or annotated with Viewer);
+      # for a plain function it passes no arguments at all
+      # (napari/_qt/_qplugins/_qnpe2.py::_get_widget_viewer_param).
+      python_name: napari_multiplex_thresholder._widget:GatingControls
+
+  widgets:
+    - command: napari-multiplex-thresholder.gating_controls
+      display_name: Multiplex Thresholder

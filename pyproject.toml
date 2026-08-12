@@ -1,0 +1,77 @@
+[build-system]
+# setuptools rather than hatchling: it is what the project's 7904_cpose4 venv already
+# has, so the plugin installs there with --no-build-isolation, no network and no new
+# build dependency in an environment two Cellpose majors have to keep working in.
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "napari-multiplex-thresholder"
+version = "0.1.0"
+description = "Napari widgets for manual per-channel gating of multiplexed tissue images"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "SciLifeLab BioImage Informatics Unit" }]
+keywords = ["napari", "spatial proteomics", "phenocycler", "gating", "thresholding"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Framework :: napari",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Topic :: Scientific/Engineering :: Image Processing",
+]
+
+# Unpinned on purpose. This is normally installed *into* an existing napari, and a
+# plugin that pins its host's dependencies breaks that host. `napari` is listed
+# without an extra so installing here never drags in a second Qt binding — see the
+# `app` extra below for a from-scratch install.
+dependencies = [
+    "napari>=0.5",
+    "qtpy",
+    "numpy",
+    "pandas",
+    "tifffile",
+    "imagecodecs",   # decoding the zlib-compressed TIFF pages
+    # Fallback for masks stored as samples-in-one-page. zarr 3 is what the store
+    # API here was written against; zarr 2 needs >=3.11 anyway via napari.
+    "zarr>=3",
+    "matplotlib",
+    "scipy",
+    "natsort",
+    "dask[array]",
+]
+
+[project.optional-dependencies]
+# One command for someone who does not have napari yet: pulls napari's Qt bindings
+# and viewer extras alongside the plugin. Python floor is 3.11 because that is
+# napari 0.8's own floor — on 3.10 pip silently falls back to napari 0.5-0.7 and
+# zarr 2, neither of which this was tested against.
+app = ["napari[all]>=0.5"]
+test = ["pytest"]
+
+[project.urls]
+Homepage = "https://github.com/BIIFSweden/napari-multiplex-thresholder"
+Repository = "https://github.com/BIIFSweden/napari-multiplex-thresholder"
+Issues = "https://github.com/BIIFSweden/napari-multiplex-thresholder/issues"
+
+[project.entry-points."napari.manifest"]
+napari-multiplex-thresholder = "napari_multiplex_thresholder:napari.yaml"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+# The npe2 manifest must ship inside the package — the napari.manifest entry point
+# above locates it by package-relative name. Without this the wheel installs but the
+# plugin never appears in the Plugins menu.
+napari_multiplex_thresholder = ["napari.yaml"]

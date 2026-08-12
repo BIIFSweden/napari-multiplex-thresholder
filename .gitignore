@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.Python
+
+# Build / packaging artefacts
+build/
+dist/
+*.egg-info/
+.eggs/
+wheels/
+
+# Virtual environments. `.venv/` is the uv environment this repo creates for local
+# testing (see README, "For development"); it is never committed.
+.venv/
+venv/
+env/
+ENV/
+.uv/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Editors / IDEs
+.idea/
+.vscode/
+*.swp
+
+# macOS. AppleDouble sidecars also appear beside real files on the project's exFAT
+# drives, which is why the package skips `._*` when listing tiles (CLAUDE.md §5.8).
+.DS_Store
+._*
+.AppleDouble
+
+# Data and outputs never belong in the repo: the tiles and masks are gigabytes, and
+# the thresholds CSV is a per-study result.
+data/
+*.tif
+*.tiff
+manual_thresholds*.csv
+*.csv.meta.json

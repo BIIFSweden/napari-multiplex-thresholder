@@ -1,0 +1,13 @@
+# Development on top of a runtime install: tests, and the tooling that builds the
+# sdist and wheel the way .github/workflows/build.yml does.
+#
+#     pip install -r requirements-dev.txt
+#     python tests/test_core.py              # synthetic, no Qt, no display
+#     python tests/test_widget_real_data.py  # real tiles; skips itself without data/new/
+#     python -m build                        # -> dist/*.whl, dist/*.tar.gz
+
+-r requirements.txt
+
+pytest             # optional: both test files also run as plain scripts
+build              # python -m build
+twine              # twine check dist/*

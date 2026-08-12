@@ -1,0 +1,40 @@
+# Everything needed to run this plugin from a source checkout, napari and its Qt
+# binding included, on Python 3.11 or newer:
+#
+#     python -m venv .venv
+#     . .venv/bin/activate            # Windows: .venv\Scripts\Activate.ps1
+#     pip install -r requirements.txt
+#     napari                          # Plugins ▸ Multiplex Thresholder
+#
+# With uv, the same thing without activating anything:
+#
+#     uv venv .venv --python 3.13
+#     uv pip install --python .venv/bin/python -r requirements.txt
+#
+# `pyproject.toml` stays the authoritative dependency list — this file mirrors it and
+# adds the two things a bare checkout also needs: a Qt binding, and the package itself.
+#
+# Installing into an *existing* napari instead? Use `pip install -e .` and ignore this
+# file: `napari[all]` below would pull a second Qt binding alongside the one you have.
+
+# The viewer, its Qt bindings and viewer extras. Bare `napari` in pyproject.toml on
+# purpose (a plugin must not choose its host's Qt binding); `[all]` here because a
+# fresh checkout has no host to inherit from. 0.8 needs Python >= 3.11, which is also
+# this package's floor — on 3.10 pip silently resolves back to napari 0.5-0.7 and
+# zarr 2, whose store API differs from the one the plane reader was written against.
+napari[all]>=0.5
+
+qtpy
+numpy
+pandas
+tifffile
+imagecodecs        # decodes the zlib-compressed TIFF pages this pipeline writes
+zarr>=3            # fallback reader for masks stored as samples-in-one-page
+matplotlib         # the KDE dock
+scipy              # gaussian_kde
+natsort
+dask[array]        # the lazy (C, H, W) image stack
+
+# The plugin itself, editable, so `Plugins ▸ Multiplex Thresholder` appears in the
+# menu. Drop the `-e` for a non-editable install from the same checkout.
+-e .

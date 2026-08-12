@@ -1,0 +1,5 @@
+# What goes into the source distribution beyond the package itself.
+include LICENSE
+include README.md
+include src/napari_multiplex_thresholder/napari.yaml
+recursive-include tests *.py
