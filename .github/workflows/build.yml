@@ -1,24 +1,35 @@
-# Build and test the distribution before anything is released.
+# Build and test the distribution. Manual only — this never starts by itself.
 #
-# Push to any branch, open a PR, or run it by hand from the Actions tab: the workflow
-# builds the sdist and the wheel once, then installs *that wheel* on Windows, macOS and
-# Linux across Python 3.11-3.13 and runs the headless test suite there. The artefacts
-# are attached to the run, so a release candidate can be downloaded and installed by
-# hand before any tag exists.
+# GitHub webpage ▸ Actions ▸ "Build and test wheel" ▸ Run workflow: choose the branch
+# **or tag** to build, choose how much of the matrix to run, press the green button.
+# There is no push, pull-request or schedule trigger, so nothing is spent unless it is
+# asked for.
 #
-# It does not publish anything — no GitHub Release, no PyPI upload. On a `v*` tag it
-# additionally fails if the tag disagrees with the version in pyproject.toml, so a
-# mistagged commit is caught here rather than after publication.
-name: build
+# It builds the sdist and the wheel once, then installs *that wheel* on the chosen
+# platforms and runs the headless test suite there. Both artefacts are attached to the
+# run, so a release candidate can be downloaded and installed by hand.
+#
+# It publishes nothing — no GitHub Release, no PyPI upload. Run it against a `v*` tag and
+# one extra check applies: the tag must agree with the version in pyproject.toml.
+#
+# The "Run workflow" button only appears once this file is on the repository's default
+# branch. Until then the workflow is not listed at all.
+name: Build and test wheel
+
+run-name: Build ${{ github.ref_name }} (${{ inputs.scope }} matrix)
 
 on:
-  push:
-    branches: ["**"]
-    tags: ["v*"]
-  pull_request:
   workflow_dispatch:
+    inputs:
+      scope:
+        description: "Platforms to install the built wheel on"
+        type: choice
+        default: full
+        options:
+          - full     # Ubuntu + Windows + macOS, Python 3.11, 3.12 and 3.13
+          - quick    # Ubuntu, Python 3.13 only — a fast check while iterating
 
-# A new push to the same branch supersedes an in-flight run.
+# A second run on the same ref supersedes an in-flight one.
 concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
@@ -36,12 +47,36 @@ jobs:
     outputs:
       version: ${{ steps.meta.outputs.version }}
       wheel: ${{ steps.meta.outputs.wheel }}
+      matrix: ${{ steps.matrix.outputs.json }}
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"   # the floor, so the build is checked at its oldest
+
+      # The `scope` input, defaulting to the full matrix if it is somehow absent. Read
+      # through the environment rather than interpolated into the script, so the value
+      # can never be shell.
+      - id: matrix
+        name: Decide the test matrix
+        env:
+          SCOPE: ${{ inputs.scope }}
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          scope = os.environ.get("SCOPE") or "full"
+          if scope == "quick":
+              combos = [{"os": "ubuntu-latest", "python-version": "3.13"}]
+          else:
+              combos = [
+                  {"os": os_, "python-version": py}
+                  for os_ in ("ubuntu-latest", "windows-latest", "macos-latest")
+                  for py in ("3.11", "3.12", "3.13")
+              ]
+          print("json=" + json.dumps(combos))
+          print(f"{scope}: {len(combos)} combination(s)", file=__import__("sys").stderr)
+          PY
 
       - name: Install build tooling
         run: python -m pip install --upgrade pip build twine
@@ -86,8 +121,9 @@ jobs:
             *) echo "::error::not a py3-none-any wheel: $(basename dist/*.whl)"; exit 1 ;;
           esac
 
-      # Only meaningful on a tag push; a mismatch here means the release would be
-      # labelled with a version the package does not report.
+      # Only when the run was dispatched against a `v*` tag (the Run workflow dropdown
+      # lists tags as well as branches). A mismatch means the release would be labelled
+      # with a version the package does not report.
       - name: Tag must match the version
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
@@ -111,8 +147,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        python-version: ["3.11", "3.12", "3.13"]
+        include: ${{ fromJSON(needs.build.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4      # for tests/, not for the package under test
 
@@ -179,6 +214,7 @@ jobs:
           cat >> "$GITHUB_STEP_SUMMARY" <<EOF
           ### napari-multiplex-thresholder $VERSION
 
-          \`$WHEEL\` built, checked, and installed on Ubuntu, Windows and macOS across
-          Python 3.11-3.13. Download it from this run's **Artifacts ▸ dist**.
+          \`$WHEEL\` built and checked, then installed and tested on every platform in
+          the **${{ inputs.scope }}** matrix.
+          Download it from this run's **Artifacts ▸ dist**.
           EOF

@@ -262,7 +262,7 @@ the total.
 file that must not shift anything), NaN-safe LUTs and percentages, mask layout detection,
 threshold-table NaN semantics and atomic save, sdist-safe export with ungated planes
 zeroed, per-plane reading and LRU capping. No Qt, no napari, no display: runs on Ubuntu,
-Windows and macOS in CI across Python 3.11–3.13.
+Windows and macOS across Python 3.11–3.13 whenever the build workflow is dispatched (§9).
 
 `tests/test_widget_real_data.py` — 17 checks with a real viewer against `data/new/`:
 path-edit refresh, Load, lazy-vs-buffer layer shapes, two-way channel/slider sync, the
@@ -303,10 +303,20 @@ nothing compiles, so there is no per-platform build or asset.
 
 ### `.github/workflows/build.yml`
 
-The only workflow. Push to any branch, PR, `workflow_dispatch`, or a `v*` tag: build the
-sdist and wheel once on 3.11 (the floor), `twine check`, then install *that wheel* on
-Ubuntu/Windows/macOS × 3.11–3.13 and run `tests/test_core.py` there. Both artefacts are
+The only workflow, and **`workflow_dispatch` only — it never starts by itself.** No push,
+PR or schedule trigger: Actions ▸ *Build and test wheel* ▸ Run workflow, pick a ref, pick
+`scope`. Build the sdist and wheel once on 3.11 (the floor), `twine check`, then install
+*that wheel* across the matrix and run `tests/test_core.py` there. Both artefacts are
 attached to the run, so a candidate is installable before any tag exists.
+
+- `scope` is a `choice` input: `full` (3 OS × 3 Python) or `quick` (ubuntu × 3.13). It is
+  turned into a matrix by a step that prints `json=…` to `$GITHUB_OUTPUT`, consumed as
+  `matrix: include: ${{ fromJSON(needs.build.outputs.matrix) }}` — the only way to vary a
+  matrix by input. The input reaches that step through `env:`, never string-interpolated
+  into the shell.
+- **The workflow is invisible until this file is on the default branch.** GitHub lists
+  dispatchable workflows from the default branch only, so on a repo whose `main` does not
+  have it yet there is no Run workflow button to press.
 
 - Two assertions on the built wheel encode §5.2 and §9: `napari_multiplex_thresholder/napari.yaml`
   must be **inside** the wheel, and the wheel must be `py3-none-any`. A missing manifest
@@ -317,11 +327,11 @@ attached to the run, so a candidate is installable before any tag exists.
   checks above.
 - `tests/test_widget_real_data.py` is **not** in CI: it needs a real OpenGL context (§6.6)
   and the study's tiles. It stays a local gate.
-- On a `v*` tag it additionally **fails if the tag disagrees with `version` in
-  `pyproject.toml`**. It does *not* create the Release or upload to PyPI — that is still
-  manual (download `dist` from the run). A `release.yml` doing it with
-  `softprops/action-gh-release` plus a trusted publisher is the obvious next step; the
-  README says so too, so the two must be updated together.
+- Dispatched against a `v*` **tag** (the ref dropdown lists tags too) it additionally
+  **fails if the tag disagrees with `version` in `pyproject.toml`**. It does *not* create
+  the Release or upload to PyPI — that is still manual (download `dist` from the run). A
+  `release.yml` doing it with `softprops/action-gh-release` plus a trusted publisher is
+  the obvious next step; the README says so too, so the two must be updated together.
 
 This folder is its own git repository with its own `.gitignore`, so the parent
 `7904_granulo` ignore rules — including its unanchored `CLAUDE.md` — no longer apply and

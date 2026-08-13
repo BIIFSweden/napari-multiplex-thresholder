@@ -124,17 +124,30 @@ there instead of fetching a build backend.
 
 ## Building and releasing
 
-`.github/workflows/build.yml` runs on every push, on pull requests, and on demand from
-the Actions tab. It builds the sdist and the wheel once on Python 3.11 (the floor),
-checks the metadata with `twine check`, asserts that the npe2 manifest is **inside** the
-wheel and that the wheel is `py3-none-any`, and then installs *that wheel* on Ubuntu,
-Windows and macOS across Python 3.11–3.13. Each of those installs deliberately omits the
-`app` extra, so there is no Qt binding: they prove the dependencies resolve to binary
-wheels on all three platforms, that the manifest is discoverable through npe2, and that
-`tests/test_core.py` passes with no display.
+`.github/workflows/build.yml` — **Build and test wheel** — is started by hand and never
+runs on its own. There is no push, pull-request or schedule trigger:
+
+> **Actions ▸ Build and test wheel ▸ Run workflow** → choose the branch or tag, choose
+> `full` or `quick`, press the green button.
+
+| input | |
+|---|---|
+| `full` | Ubuntu + Windows + macOS × Python 3.11, 3.12, 3.13 — nine installs |
+| `quick` | Ubuntu × 3.13 only, for a fast check while iterating |
+
+It builds the sdist and the wheel once on Python 3.11 (the floor), checks the metadata
+with `twine check`, asserts that the npe2 manifest is **inside** the wheel and that the
+wheel is `py3-none-any`, and then installs *that wheel* on each platform in the matrix.
+Those installs deliberately omit the `app` extra, so there is no Qt binding: they prove
+the dependencies resolve to binary wheels on every platform, that the manifest is
+discoverable through npe2, and that `tests/test_core.py` passes with no display.
 
 Both files are attached to the run, so a release candidate can be downloaded and
 installed by hand before any tag exists — **Actions ▸ the run ▸ Artifacts ▸ dist**.
+
+The workflow is listed on the Actions page only once this file is on the repository's
+default branch. Push it to `main` first, or the Run workflow button is nowhere to be
+found.
 
 To release:
 
@@ -144,11 +157,14 @@ git tag v0.1.1
 git push origin v0.1.1
 ```
 
-A `v*` tag runs the same workflow with one extra check: it fails if the tag disagrees
-with the version in `pyproject.toml`, so a mistagged commit is caught before anyone sees
-it. The workflow **does not publish**: it creates no GitHub Release and uploads nothing
-to PyPI. Take `dist` from the tag's run and attach the two files to a release by hand, or
-add a `release.yml` (build + `softprops/action-gh-release`, plus a PyPI
+Then run the workflow once more, picking `v0.1.1` in the ref dropdown — the dropdown
+lists tags as well as branches, and on a `v*` ref one extra check applies: the run fails
+if the tag disagrees with the version in `pyproject.toml`, so a mistagged commit is
+caught before anyone sees it.
+
+The workflow **does not publish**: it creates no GitHub Release and uploads nothing to
+PyPI. Take `dist` from that run and attach the two files to a release by hand, or add a
+`release.yml` (build + `softprops/action-gh-release`, plus a PyPI
 [trusted publisher](https://docs.pypi.org/trusted-publishers/) if PyPI is wanted).
 
 ## Using it
