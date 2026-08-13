@@ -196,24 +196,39 @@ def _check_manifest() -> str:
 
 
 #: Substrings that mean "this machine has no usable OpenGL", not "the bundle is broken".
-#: A windows-latest runner has no GPU driver, so PyOpenGL resolves its entry points to
-#: NULL and its `latebind` wrapper raises `TypeError: 'NoneType' object is not callable`
-#: the moment vispy asks for a canvas. Same class of failure as a Linux box with no
-#: libGL, or a Mac over SSH.
+#: Two ways a driverless runner fails, both seen on windows-latest: PyOpenGL resolves its
+#: entry points to NULL and `latebind` raises `TypeError: 'NoneType' object is not
+#: callable`, or a context exists in one library instance while the query goes to another
+#: and `glGetIntegerv` returns GL_INVALID_OPERATION (1282). A Linux box with no libGL and
+#: a Mac over SSH land here too.
+#:
+#: Kept narrow on purpose. A bare "opengl" or "vispy" would also match
+#: `ModuleNotFoundError: No module named 'vispy.glsl'` — a packaging bug, exactly the
+#: thing this check exists to catch — so those are not markers, and the type-based
+#: exclusion below is the second line of defence.
 _NO_OPENGL_MARKERS = (
-    "latebind",
-    "opengl",
-    "glerror",
-    "libgl",
+    "latebind",                        # PyOpenGL entry point resolved to NULL
+    "glerror",                         # OpenGL.error.GLError
+    "invalid operation",               # GL_INVALID_OPERATION: context not current
+    "failed to create opengl context",
+    "could not create opengl context",
+    "could not initialize opengl",
     "wglcreatecontext",
-    "egl",
-    "vispy",
-    "could not create",
-    "failed to create",
+    "libgl.so",
+    "libegl.so",
+    "cannot connect to x server",
 )
 
 
 def _is_missing_opengl(exc: BaseException) -> bool:
+    """Is this the machine's missing GL, or the bundle's missing content?
+
+    Anything that failed to *import* or to *find a file* is a packaging problem by
+    definition — a frozen app carries its own imports — so those are never excused, no
+    matter what the message says.
+    """
+    if isinstance(exc, (ImportError, FileNotFoundError)):
+        return False
     text = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).lower()
     return any(marker in text for marker in _NO_OPENGL_MARKERS)
 

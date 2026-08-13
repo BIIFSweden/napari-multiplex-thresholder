@@ -118,38 +118,49 @@ jobs:
       # PyOpenGL resolves its entry points to NULL and vispy dies with
       # "TypeError: 'NoneType' object is not callable" the moment napari asks for a
       # canvas. Qt ships llvmpipe as opengl32sw.dll; dropped into the app's own folder
-      # under the name Windows looks for first, the frozen app gets a real software GL
-      # context and the viewer check runs for real.
+      # under the name Windows resolves from the executable's directory first, both Qt
+      # and PyOpenGL can load the same software GL.
       #
-      # It is deliberately *not* part of the bundle: shipping it would force every user
-      # onto software rendering. Copied in for the test, deleted right after, and the
+      # "Can", not "will": Qt judges desktop GL inadequate and falls back to loading its
+      # *own* opengl32sw.dll, so the two ended up with separate llvmpipe instances — the
+      # context in Qt's, the query in PyOpenGL's, and GL_INVALID_OPERATION (1282) out of
+      # glGetIntegerv. QT_OPENGL=desktop in the test step forbids that fallback so both
+      # resolve the same module. If it still does not take, the viewer check reports a
+      # skip rather than failing the job (see below).
+      #
+      # The DLL is deliberately *not* part of the bundle: shipping it would force every
+      # user onto software rendering. Copied in for the test, deleted right after, and the
       # Package step refuses to archive a folder that still contains it.
       - name: Windows — software OpenGL for the test only
         if: runner.os == 'Windows'
-        id: swgl
         run: |
           # In Python, not `find`: Git Bash on Windows and native Windows paths do not
           # mix, and the DLL sits in a different place depending on the Qt wheel.
-          python - <<'PY' >> "$GITHUB_OUTPUT"
-          import shutil, sys, sysconfig
+          python - <<'PY'
+          import shutil, sysconfig
           from pathlib import Path
 
           app = Path("dist/Multiplex Thresholder")
           roots = [app, Path(sysconfig.get_paths()["purelib"])]
           src = next((p for root in roots if root.is_dir() for p in root.rglob("opengl32sw.dll")), None)
           if src is None:
-              print("::warning::opengl32sw.dll not found — the viewer check will be skipped", file=sys.stderr)
-              print("available=false")
+              print("::warning::opengl32sw.dll not found — the viewer check will report a skip")
           else:
               shutil.copy2(src, app / "opengl32.dll")
-              print(f"software GL from {src}", file=sys.stderr)
-              print("available=true")
+              print(f"software GL from {src}")
           PY
 
-      # The point of the whole job: run what was just built. The bundle checks (compiled
-      # TIFF decoders, npe2 discovery, matplotlib's Qt backend) are always fatal; the
-      # viewer check needs a GL context, and `--require-gui` says one was arranged here,
-      # so a missing context is a failure rather than a skip.
+      # The point of the whole job: run what was just built. The bundle checks — compiled
+      # TIFF decoders, npe2 discovery, matplotlib's Qt backend — are always fatal, on
+      # every platform. The viewer check needs a live GL context, so who has to have one
+      # is a per-platform decision:
+      #
+      #   macOS   a real context, no display needed  -> --require-gui
+      #   Linux   xvfb with mesa is reliable         -> --require-gui
+      #   Windows software GL on a driverless runner is best-effort, so a context that
+      #           never materialises is reported as a skip. This is a limitation of the
+      #           runner, not of the app; the same bundle opens on a real Windows
+      #           machine. Verify a release candidate there with --smoke.
       #
       # Timed out deliberately short: a frozen GUI app that wedges should fail in five
       # minutes, not sit until the job's 90.
@@ -162,18 +173,20 @@ jobs:
         run: |
           case "$RUNNER_OS" in
             macOS)
-              "dist/Multiplex Thresholder.app/Contents/MacOS/Multiplex Thresholder" --self-test --require-gui ;;
+              "dist/Multiplex Thresholder.app/Contents/MacOS/Multiplex Thresholder" \
+                --self-test --require-gui ;;
             Windows)
-              # `if`, not `[ … ] && …`: this step runs under `bash -e`, where a bare
-              # test that returns false would abort the whole step.
-              require=""
-              if [ "${{ steps.swgl.outputs.available }}" = "true" ]; then
-                require="--require-gui"
-              fi
-              "dist/Multiplex Thresholder/Multiplex Thresholder.exe" --self-test $require
+              # QT_OPENGL=desktop: use the opengl32.dll copied in above rather than Qt's
+              # own opengl32sw.dll, so Qt's context and PyOpenGL's queries are the same
+              # library. Not asserted — see the note above.
+              QT_OPENGL=desktop \
+                "dist/Multiplex Thresholder/Multiplex Thresholder.exe" --self-test
               rm -f "dist/Multiplex Thresholder/opengl32.dll" ;;
             Linux)
-              xvfb-run -a "dist/Multiplex Thresholder/Multiplex Thresholder" --self-test --require-gui ;;
+              # A GLX-capable screen, explicitly: xvfb's default visual has caught vispy
+              # out before.
+              xvfb-run -a --server-args="-screen 0 1280x1024x24 +extension GLX +render" \
+                "dist/Multiplex Thresholder/Multiplex Thresholder" --self-test --require-gui ;;
           esac
 
       # `ditto`, not `zip`: the .app contains symlinked Qt frameworks and an ad-hoc code

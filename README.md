@@ -73,9 +73,11 @@ tag, and start it:
 Every desktop job launches what it just froze and runs its `--self-test`, so a bundle
 that cannot start fails the job. That check has two tiers: the packaging checks (bundled
 TIFF decoders, npe2 discovery, matplotlib's Qt backend) always have to pass, while the
-napari-viewer check needs an OpenGL context and reports a visible SKIP on a machine that
-has none. Runners get one anyway — xvfb on Linux, Qt's llvmpipe copied in on Windows —
-and are then run with `--require-gui`, which turns a missing context back into a failure.
+napari-viewer check needs a live OpenGL context and reports a visible SKIP where there is
+none. macOS and Linux runners have one — real, and xvfb with mesa — so they add
+`--require-gui`, which makes a missing context a failure. The Windows runner has no GPU
+driver, and software GL there is best-effort, so the viewer check may report a skip; check
+a Windows release candidate on real hardware with `--smoke`.
 
 Download the results from the finished run under **Artifacts**.
 
