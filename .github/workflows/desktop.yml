@@ -86,6 +86,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+          # napari[all] + PyInstaller is a ~2.5 minute download on a cold runner.
+          cache: pip
+          cache-dependency-path: pyproject.toml
 
       # Qt6 needs its X libraries even to start offscreen, and the self-test needs a
       # GL-capable display, which on a runner means xvfb with software mesa.
@@ -111,15 +114,66 @@ jobs:
       - name: Freeze
         run: python -m PyInstaller app/MultiplexThresholder.spec --noconfirm --distpath dist --workpath build
 
-      # The point of the whole job. `--self-test` builds the entire GUI inside the
-      # frozen app, checks the KDE canvas, decodes a zlib TIFF through the bundled
-      # imagecodecs, checks npe2 discovery, and exits non-zero on any of it.
+      # A windows-latest runner has no GPU driver: the system opengl32.dll is a stub, so
+      # PyOpenGL resolves its entry points to NULL and vispy dies with
+      # "TypeError: 'NoneType' object is not callable" the moment napari asks for a
+      # canvas. Qt ships llvmpipe as opengl32sw.dll; dropped into the app's own folder
+      # under the name Windows looks for first, the frozen app gets a real software GL
+      # context and the viewer check runs for real.
+      #
+      # It is deliberately *not* part of the bundle: shipping it would force every user
+      # onto software rendering. Copied in for the test, deleted right after, and the
+      # Package step refuses to archive a folder that still contains it.
+      - name: Windows — software OpenGL for the test only
+        if: runner.os == 'Windows'
+        id: swgl
+        run: |
+          # In Python, not `find`: Git Bash on Windows and native Windows paths do not
+          # mix, and the DLL sits in a different place depending on the Qt wheel.
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import shutil, sys, sysconfig
+          from pathlib import Path
+
+          app = Path("dist/Multiplex Thresholder")
+          roots = [app, Path(sysconfig.get_paths()["purelib"])]
+          src = next((p for root in roots if root.is_dir() for p in root.rglob("opengl32sw.dll")), None)
+          if src is None:
+              print("::warning::opengl32sw.dll not found — the viewer check will be skipped", file=sys.stderr)
+              print("available=false")
+          else:
+              shutil.copy2(src, app / "opengl32.dll")
+              print(f"software GL from {src}", file=sys.stderr)
+              print("available=true")
+          PY
+
+      # The point of the whole job: run what was just built. The bundle checks (compiled
+      # TIFF decoders, npe2 discovery, matplotlib's Qt backend) are always fatal; the
+      # viewer check needs a GL context, and `--require-gui` says one was arranged here,
+      # so a missing context is a failure rather than a skip.
+      #
+      # Timed out deliberately short: a frozen GUI app that wedges should fail in five
+      # minutes, not sit until the job's 90.
       - name: Launch the frozen app and self-test it
+        timeout-minutes: 5
+        env:
+          # Belt and braces — GitHub sets CI=true, and either one stops the crash
+          # reporter from opening a modal dialog nobody can dismiss.
+          MULTIPLEX_THRESHOLDER_NO_DIALOG: "1"
         run: |
           case "$RUNNER_OS" in
-            macOS)   "dist/Multiplex Thresholder.app/Contents/MacOS/Multiplex Thresholder" --self-test ;;
-            Windows) "dist/Multiplex Thresholder/Multiplex Thresholder.exe" --self-test ;;
-            Linux)   xvfb-run -a "dist/Multiplex Thresholder/Multiplex Thresholder" --self-test ;;
+            macOS)
+              "dist/Multiplex Thresholder.app/Contents/MacOS/Multiplex Thresholder" --self-test --require-gui ;;
+            Windows)
+              # `if`, not `[ … ] && …`: this step runs under `bash -e`, where a bare
+              # test that returns false would abort the whole step.
+              require=""
+              if [ "${{ steps.swgl.outputs.available }}" = "true" ]; then
+                require="--require-gui"
+              fi
+              "dist/Multiplex Thresholder/Multiplex Thresholder.exe" --self-test $require
+              rm -f "dist/Multiplex Thresholder/opengl32.dll" ;;
+            Linux)
+              xvfb-run -a "dist/Multiplex Thresholder/Multiplex Thresholder" --self-test --require-gui ;;
           esac
 
       # `ditto`, not `zip`: the .app contains symlinked Qt frameworks and an ad-hoc code
@@ -132,6 +186,12 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           name="MultiplexThresholder-${VERSION}-${TARGET}"
+          # The software-GL shim is a test fixture. If it is still here, the test step
+          # did not clean up and users would be shipped llvmpipe instead of their GPU.
+          if [ -f "dist/Multiplex Thresholder/opengl32.dll" ]; then
+            echo "::error::opengl32.dll (software GL test shim) is still in the app folder"
+            exit 1
+          fi
           case "$RUNNER_OS" in
             macOS)
               ditto -c -k --sequesterRsrc --keepParent "dist/Multiplex Thresholder.app" "${name}.zip"

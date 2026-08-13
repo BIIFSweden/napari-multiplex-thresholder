@@ -70,9 +70,14 @@ tag, and start it:
 | **Build desktop apps** | `all`, or one platform | the four double-clickable archives, ~10 min per platform |
 | **Build and test wheel** | `full` or `quick` | sdist + wheel, installed and tested on Ubuntu/Windows/macOS × Python 3.11–3.13 |
 
-Every desktop job launches what it just froze and runs its `--self-test` — a bundle that
-cannot start fails the job. Download the results from the finished run under
-**Artifacts**.
+Every desktop job launches what it just froze and runs its `--self-test`, so a bundle
+that cannot start fails the job. That check has two tiers: the packaging checks (bundled
+TIFF decoders, npe2 discovery, matplotlib's Qt backend) always have to pass, while the
+napari-viewer check needs an OpenGL context and reports a visible SKIP on a machine that
+has none. Runners get one anyway — xvfb on Linux, Qt's llvmpipe copied in on Windows —
+and are then run with `--require-gui`, which turns a missing context back into a failure.
+
+Download the results from the finished run under **Artifacts**.
 
 ## Release
 

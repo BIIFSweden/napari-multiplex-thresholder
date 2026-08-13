@@ -13,14 +13,21 @@ class needs none of that, so the app opens even if the metadata copy regresses. 
 manifest is still bundled, so the menu entry works too — `--self-test` checks both, and
 reports the difference instead of hiding it.
 
-`--self-test` is what CI runs on all four platforms. It builds the whole GUI, then
-exercises the three things that break silently when frozen and *only* when frozen:
+`--self-test` is what CI runs on all four platforms. It never opens a window, and it
+separates two kinds of failure that a single check used to conflate:
 
-  * the matplotlib Qt backend (the KDE dock's canvas),
-  * imagecodecs' compiled decoders, by writing and reading back a zlib TIFF,
-  * npe2 entry-point discovery, i.e. whether the Plugins menu will be populated.
+  * **Bundle checks**, which need no OpenGL and are always fatal when they fail:
+    imagecodecs' compiled decoders (by writing and reading back a zlib TIFF), npe2
+    entry-point discovery — i.e. whether the Plugins menu will be populated — and
+    matplotlib's Qt backend, built as a bare canvas without napari.
+  * **The viewer check**, a real napari viewer with both docks, which needs a GL
+    context. A machine without one (a CI runner with no GPU driver) reports SKIP, not
+    failure; `--require-gui` turns that back into a failure where a context was
+    arranged on purpose.
 
-It never opens a window and always exits non-zero on failure.
+Failures print and, for a real user, also raise a dialog — but never under
+`--self-test`, `--smoke` or `CI`, because a modal dialog on a runner blocks until the
+job times out. See `is_interactive`.
 """
 
 from __future__ import annotations
@@ -91,7 +98,24 @@ def crash_log_path() -> Path:
     return _user_dir("logs") / "last-crash.log"
 
 
-def _report_crash(exc: BaseException) -> Path | None:
+def is_interactive(args: list[str] | None = None) -> bool:
+    """Is there a person in front of this process to click a dialog?
+
+    `QMessageBox.exec()` is **modal**: with nobody to press OK it blocks forever. In CI
+    that turned a two-second failure into a job that ran until its timeout, with the
+    traceback already printed and the runner apparently hung. So the dialog is offered
+    only to a real user: not under `--self-test`/`--smoke`, and not when a CI runner has
+    set `CI`. `MULTIPLEX_THRESHOLDER_NO_DIALOG=1` forces it off anywhere.
+    """
+    if os.environ.get("MULTIPLEX_THRESHOLDER_NO_DIALOG"):
+        return False
+    if os.environ.get("CI"):
+        return False
+    args = list(sys.argv[1:] if args is None else args)
+    return not ({"--self-test", "--smoke", "--require-gui"} & set(args))
+
+
+def _report_crash(exc: BaseException, interactive: bool = True) -> Path | None:
     """Write the traceback where support can ask for it, and say where that was."""
     text = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
     sys.stderr.write(text)
@@ -105,6 +129,8 @@ def _report_crash(exc: BaseException) -> Path | None:
     except Exception:  # noqa: BLE001 — a crash report must not crash
         return None
     sys.stderr.write(f"\nwritten to {path}\n")
+    if not interactive:
+        return path
     try:  # a bare .app user never sees stderr, so try for a dialog as well
         from qtpy.QtWidgets import QApplication, QMessageBox
 
@@ -169,19 +195,55 @@ def _check_manifest() -> str:
     return f"{mf.name} -> {widgets}"
 
 
-def self_test() -> int:
-    """Build everything, verify it, tear it down. No window, no event loop."""
-    print(environment_summary(), flush=True)
-    failures: list[str] = []
+#: Substrings that mean "this machine has no usable OpenGL", not "the bundle is broken".
+#: A windows-latest runner has no GPU driver, so PyOpenGL resolves its entry points to
+#: NULL and its `latebind` wrapper raises `TypeError: 'NoneType' object is not callable`
+#: the moment vispy asks for a canvas. Same class of failure as a Linux box with no
+#: libGL, or a Mac over SSH.
+_NO_OPENGL_MARKERS = (
+    "latebind",
+    "opengl",
+    "glerror",
+    "libgl",
+    "wglcreatecontext",
+    "egl",
+    "vispy",
+    "could not create",
+    "failed to create",
+)
 
+
+def _is_missing_opengl(exc: BaseException) -> bool:
+    text = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).lower()
+    return any(marker in text for marker in _NO_OPENGL_MARKERS)
+
+
+def _check_matplotlib_canvas() -> str:
+    """Build a QtAgg canvas without napari, so the check survives a GL-less machine.
+
+    The KDE dock's canvas is the thing being proved here — matplotlib's Qt backend, which
+    PyInstaller has to be told about explicitly. It needs a QApplication but no OpenGL.
+    """
+    from qtpy.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication(sys.argv[:1])
+    from ._widget import KdePlot
+
+    kde = KdePlot(dark=True)
+    name = type(kde.canvas).__name__
+    kde.deleteLater()
+    del app
+    return name
+
+
+def _check_viewer() -> str:
+    """The real thing: a napari viewer with both docks. Needs an OpenGL context."""
     import napari
 
-    print(f"napari {napari.__version__}", flush=True)
+    from ._widget import KDE_DOCK_NAME, make_gating_widget
 
     viewer = napari.Viewer(title=APP_NAME, show=False)
     try:
-        from ._widget import KDE_DOCK_NAME, make_gating_widget
-
         # make_gating_widget, not GatingControls: it docks the KDE straight away
         # instead of on the next event-loop turn, and there is no loop here.
         controls = make_gating_widget(viewer)
@@ -190,31 +252,64 @@ def self_test() -> int:
         # `dock_widgets` since napari 0.8; `_dock_widgets` warns but still works, and
         # older napari has only that.
         docks = list(getattr(viewer.window, "dock_widgets", None) or getattr(viewer.window, "_dock_widgets", {}))
-        print(f"docks: {docks}", flush=True)
-        for expected in (CONTROLS_DOCK_NAME, KDE_DOCK_NAME):
-            if expected not in docks:
-                failures.append(f"dock missing: {expected!r} (have {docks})")
-
-        # The KDE canvas exists only if matplotlib's Qt backend came along.
+        missing = [d for d in (CONTROLS_DOCK_NAME, KDE_DOCK_NAME) if d not in docks]
+        if missing:
+            raise AssertionError(f"dock missing: {missing} (have {docks})")
         if getattr(controls.kde, "canvas", None) is None:
-            failures.append("KDE dock has no matplotlib canvas")
-        else:
-            print(f"matplotlib canvas: {type(controls.kde.canvas).__name__}", flush=True)
-
-        for label, check in (("plane reading", _check_plane_reading), ("npe2 manifest", _check_manifest)):
-            try:
-                print(f"{label}: {check()}", flush=True)
-            except Exception as exc:  # noqa: BLE001 — collect every failure, not the first
-                failures.append(f"{label}: {type(exc).__name__}: {exc}")
-                traceback.print_exc()
+            raise AssertionError("KDE dock has no matplotlib canvas")
+        return f"napari {napari.__version__}, docks {docks}"
     finally:
         viewer.close()
+
+
+def self_test(require_gui: bool = False) -> int:
+    """Verify the bundle, then tear it down. No window, no event loop.
+
+    Two tiers, because they fail for different reasons:
+
+    * **Bundle checks** need no OpenGL — the compiled TIFF decoders, npe2 discovery, and
+      matplotlib's Qt backend. A failure here is always a packaging bug.
+    * **The viewer check** builds a real napari viewer with both docks, and needs a GL
+      context. On a machine that has none (a CI runner with no GPU driver) it is reported
+      as SKIP rather than failure, unless `--require-gui` says a context was arranged and
+      its absence is itself the bug.
+    """
+    print(environment_summary(), flush=True)
+    failures: list[str] = []
+    skipped: list[str] = []
+
+    checks = (
+        ("plane reading", _check_plane_reading),
+        ("npe2 manifest", _check_manifest),
+        ("matplotlib canvas", _check_matplotlib_canvas),
+    )
+    for label, check in checks:
+        try:
+            print(f"{label}: {check()}", flush=True)
+        except Exception as exc:  # noqa: BLE001 — collect every failure, not the first
+            failures.append(f"{label}: {type(exc).__name__}: {exc}")
+            traceback.print_exc()
+
+    try:
+        print(f"viewer: {_check_viewer()}", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        if _is_missing_opengl(exc) and not require_gui:
+            skipped.append(f"viewer: no usable OpenGL on this machine ({type(exc).__name__}: {exc})")
+        else:
+            failures.append(f"viewer: {type(exc).__name__}: {exc}")
+            traceback.print_exc()
 
     if failures:
         print("\nSELF-TEST FAILED", flush=True)
         for f in failures:
             print(f"  - {f}", flush=True)
         return 1
+    if skipped:
+        print("\nSELF-TEST OK (with skips)", flush=True)
+        for s in skipped:
+            print(f"  ~ {s}", flush=True)
+        print("  the bundle is complete; its GUI was not exercised here", flush=True)
+        return 0
     print("\nSELF-TEST OK", flush=True)
     return 0
 
@@ -275,25 +370,31 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"{APP_NAME}\n\n"
             "  (no arguments)   open the viewer with both gating docks\n"
-            "  --self-test      build the GUI headless, verify the bundle, exit\n"
+            "  --self-test      verify the bundle headlessly and exit; the viewer part\n"
+            "                   is skipped, not failed, where there is no OpenGL\n"
+            "  --require-gui    with --self-test: a missing OpenGL context is a failure\n"
             "  --smoke [SECS]   open the window for real, close it again (default 5 s)\n"
             "  --version        print the version\n\n"
-            f"crash log: {crash_log_path()}"
+            f"crash log: {crash_log_path()}\n"
+            "no dialog on failure: --self-test, --smoke, CI=1, or "
+            "MULTIPLEX_THRESHOLDER_NO_DIALOG=1"
         )
         return 0
 
     smoke: float | None = None
     if "--smoke" in args:
-        after = args[args.index("--smoke") + 1 :]
+        after = [a for a in args[args.index("--smoke") + 1 :] if not a.startswith("-")]
         try:
             smoke = float(after[0]) if after else 5.0
         except ValueError:
             smoke = 5.0
 
     try:
-        return self_test() if "--self-test" in args else run(smoke)
+        if "--self-test" in args:
+            return self_test(require_gui="--require-gui" in args)
+        return run(smoke)
     except Exception as exc:  # noqa: BLE001 — the outermost frame of a windowed app
-        _report_crash(exc)
+        _report_crash(exc, interactive=is_interactive(args))
         return 1
 
 
