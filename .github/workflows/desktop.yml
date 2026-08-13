@@ -1,0 +1,164 @@
+# Freeze the double-clickable application, one artefact per platform. Manual only.
+#
+# GitHub webpage ▸ Actions ▸ "Build desktop apps" ▸ Run workflow: choose the branch or
+# tag, choose which platforms, press the green button. Nothing here runs by itself.
+#
+# Each job installs napari and the plugin, runs PyInstaller over
+# app/MultiplexThresholder.spec, then **launches the frozen app with `--self-test`** —
+# the build is only useful if the bundle actually starts, and a freeze fails silently in
+# ways a wheel never does (missing Qt plugins, missing compiled TIFF decoders, an empty
+# Plugins menu). A job that cannot self-test fails.
+#
+# Artefacts are ~700 MB-1.2 GB each, so the download is one platform at a time:
+#
+#   MultiplexThresholder-<version>-macos-arm64.zip     Multiplex Thresholder.app
+#   MultiplexThresholder-<version>-macos-x86_64.zip    Multiplex Thresholder.app
+#   MultiplexThresholder-<version>-windows-x64.zip     Multiplex Thresholder.exe + libs
+#   MultiplexThresholder-<version>-linux-x64.tar.gz    Multiplex Thresholder + libs
+#
+# Neither the app nor the installer is code-signed: macOS needs one right-click ▸ Open,
+# Windows one "More info ▸ Run anyway". Signing needs a paid certificate per platform;
+# see the README.
+name: Build desktop apps
+
+run-name: Desktop apps from ${{ github.ref_name }} (${{ inputs.platforms }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: "Which platforms to freeze"
+        type: choice
+        default: all
+        options:
+          - all
+          - macos-arm64      # Apple Silicon
+          - macos-x86_64     # Intel Macs
+          - windows-x64
+          - linux-x64
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  matrix:
+    name: plan
+    runs-on: ubuntu-latest
+    outputs:
+      json: ${{ steps.plan.outputs.json }}
+    steps:
+      - id: plan
+        env:
+          WANTED: ${{ inputs.platforms }}
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+
+          # runner images: macos-latest is Apple Silicon, macos-13 is the last Intel one.
+          targets = {
+              "macos-arm64":  {"target": "macos-arm64",  "os": "macos-latest",   "archive": "zip"},
+              "macos-x86_64": {"target": "macos-x86_64", "os": "macos-13",       "archive": "zip"},
+              "windows-x64":  {"target": "windows-x64",  "os": "windows-latest", "archive": "zip"},
+              "linux-x64":    {"target": "linux-x64",    "os": "ubuntu-latest",  "archive": "tar"},
+          }
+          wanted = os.environ.get("WANTED") or "all"
+          chosen = list(targets.values()) if wanted == "all" else [targets[wanted]]
+          print("json=" + json.dumps(chosen))
+          PY
+
+  freeze:
+    name: ${{ matrix.target }}
+    needs: matrix
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.matrix.outputs.json) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # Qt6 needs its X libraries even to start offscreen, and the self-test needs a
+      # GL-capable display, which on a runner means xvfb with software mesa.
+      - name: Linux — Qt and OpenGL runtime
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            xvfb libegl1 libopengl0 libglx-mesa0 libgl1-mesa-dri libglib2.0-0 \
+            libdbus-1-3 libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
+            libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 \
+            libxcb-xfixes0 libxcb-xinerama0 libxrender1 libfontconfig1
+
+      - name: Install napari, the plugin and PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ".[bundle]"
+          python -c "import napari, PyInstaller; print('napari', napari.__version__, '| pyinstaller', PyInstaller.__version__)"
+
+      - id: version
+        run: echo "value=$(python -c "import tomllib,pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")" >> "$GITHUB_OUTPUT"
+
+      - name: Freeze
+        run: python -m PyInstaller app/MultiplexThresholder.spec --noconfirm --distpath dist --workpath build
+
+      # The point of the whole job. `--self-test` builds the entire GUI inside the
+      # frozen app, checks the KDE canvas, decodes a zlib TIFF through the bundled
+      # imagecodecs, checks npe2 discovery, and exits non-zero on any of it.
+      - name: Launch the frozen app and self-test it
+        run: |
+          case "$RUNNER_OS" in
+            macOS)   "dist/Multiplex Thresholder.app/Contents/MacOS/Multiplex Thresholder" --self-test ;;
+            Windows) "dist/Multiplex Thresholder/Multiplex Thresholder.exe" --self-test ;;
+            Linux)   xvfb-run -a "dist/Multiplex Thresholder/Multiplex Thresholder" --self-test ;;
+          esac
+
+      # `ditto`, not `zip`: the .app contains symlinked Qt frameworks and an ad-hoc code
+      # signature, and `zip -r` flattens the first and invalidates the second, which
+      # makes macOS refuse the app as damaged.
+      - name: Package
+        id: package
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          name="MultiplexThresholder-${VERSION}-${TARGET}"
+          case "$RUNNER_OS" in
+            macOS)
+              ditto -c -k --sequesterRsrc --keepParent "dist/Multiplex Thresholder.app" "${name}.zip"
+              echo "file=${name}.zip" >> "$GITHUB_OUTPUT" ;;
+            Windows)
+              7z a -tzip -mx=5 "${name}.zip" "dist/Multiplex Thresholder" >/dev/null
+              echo "file=${name}.zip" >> "$GITHUB_OUTPUT" ;;
+            Linux)
+              tar czf "${name}.tar.gz" -C dist "Multiplex Thresholder"
+              echo "file=${name}.tar.gz" >> "$GITHUB_OUTPUT" ;;
+          esac
+          ls -lh "${name}."* | cat
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MultiplexThresholder-${{ matrix.target }}
+          path: ${{ steps.package.outputs.file }}
+          if-no-files-found: error
+          compression-level: 0    # the archive is already compressed
+
+      - name: Summary
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+          TARGET: ${{ matrix.target }}
+          FILE: ${{ steps.package.outputs.file }}
+        run: |
+          size=$(du -h "$FILE" | cut -f1)
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+          **$TARGET** — \`$FILE\` ($size), self-test passed.
+          EOF

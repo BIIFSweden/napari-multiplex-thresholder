@@ -43,12 +43,16 @@ cd napari-multiplex-thresholder
 | `src/napari_multiplex_thresholder/_lazy.py` | 222 | Per-plane readers with a small LRU, and the dask stack for the image layer. |
 | `src/napari_multiplex_thresholder/_widget.py` | 921 | `GatingControls` (dock 1) and `KdePlot` (dock 2). The only module that imports Qt. |
 | `src/napari_multiplex_thresholder/__init__.py` | 67 | Re-exports; the Qt names come through a lazy `__getattr__`. |
+| `src/napari_multiplex_thresholder/_app.py` | 255 | The application: viewer + both docks, `--self-test`, `--smoke`, and a crash log for a windowed build with no console. Shared by the frozen app, the `multiplex-thresholder` console script and `python -m napari_multiplex_thresholder`. |
+| `src/napari_multiplex_thresholder/__main__.py` | 6 | `python -m` → `_app.main`. |
 | `src/napari_multiplex_thresholder/napari.yaml` | — | npe2 manifest, one widget contribution. **Must ship inside the wheel.** |
+| `app/MultiplexThresholder.spec` | 188 | PyInstaller recipe for the double-clickable app (§9). |
+| `app/launcher.py` · `app/runtime_hook.py` | 15 · 48 | The frozen entry script, and the four things the bundle must not be left to guess. |
 | `tests/test_core.py` | 231 | Synthetic fixtures, runs anywhere, doubles as a script (`python tests/test_core.py`). |
 | `tests/test_widget_real_data.py` | 363 | Real napari viewer against the project's `data/new/`; skips itself if absent. |
 
 `pyproject.toml`, `LICENSE`, `MANIFEST.in`, `requirements*.txt`, `.gitignore` and
-`.github/workflows/build.yml` are the distribution (§9). `pyproject.toml` is the
+`.github/workflows/{build,desktop}.yml` are the distribution (§9). `pyproject.toml` is the
 authoritative dependency list; `requirements.txt` mirrors it and adds the two things a
 bare checkout also needs — `napari[all]` for a Qt binding and `-e .` for the plugin
 itself — so it drifts if one changes without the other.
@@ -317,6 +321,64 @@ attached to the run, so a candidate is installable before any tag exists.
 - **The workflow is invisible until this file is on the default branch.** GitHub lists
   dispatchable workflows from the default branch only, so on a repo whose `main` does not
   have it yet there is no Run workflow button to press.
+
+### The desktop app — `app/MultiplexThresholder.spec`, `.github/workflows/desktop.yml`
+
+A frozen napari: `Multiplex Thresholder.app` / `.exe`, double-clicked, opens the viewer
+with both docks already in place. Measured on macOS arm64: **466 MB**, 95 s to build,
+13.1 s for the first launch and **2.1 s** for every one after it (§9.7). `desktop.yml` is
+`workflow_dispatch`-only like the other one, one job per target (macos-arm64 ·
+macos-x86_64 · windows-x64 · linux-x64), and each job **launches what it built and runs
+`--self-test`** before uploading anything.
+
+napari upstream does not support PyInstaller — its own installer is conda constructor —
+so the spec is this project's own, and none of it is decoration:
+
+1. **`copy_metadata(..., recursive=True)` is what makes the Plugins menu exist.** npe2
+   finds plugins through `importlib.metadata` entry points, which need the `.dist-info`
+   directories *inside* the bundle. Miss them and the app still opens — `_app.run()`
+   instantiates `GatingControls` directly, deliberately, so the one thing the user came
+   for never depends on plugin discovery — but the Plugins menu and File ▸ Open are
+   empty. `--self-test` reports it rather than letting it pass.
+2. **`collect_all` for napari, napari_builtins, napari_console, vispy, dask, imagecodecs,
+   zarr, numcodecs.** Data files, not just modules: napari's qss and icons, vispy's GLSL,
+   `dask.yaml`, the compiled codecs. PyInstaller's analysis finds none of these.
+3. **`multiprocessing.freeze_support()` is the first statement in `app/launcher.py`**,
+   before the import of `_app`. A frozen child process re-executes the entry script, so
+   without it anything that spawns a worker starts a second copy of the application.
+4. **One-dir, never one-file.** `--onefile` would unpack ~460 MB of Qt into a temp
+   directory on every launch, and Qt's plugin loader misbehaves from there.
+5. **`PySide6`/`PySide2`/`PyQt5` are in `excludes`.** Two Qt bindings in one bundle abort
+   at startup with "could not load the Qt platform plugin".
+6. **`console=False`**, so there is no stdout to read: `_app.crash_log_path()` writes the
+   traceback to `~/Library/Logs/MultiplexThresholder/` (or `%LOCALAPPDATA%`) and
+   `_report_crash` also tries a Qt dialog. Without that a failed launch is a silent bounce.
+7. **PyInstaller's own matplotlib runtime hook cannot be beaten from a runtime hook.**
+   `pyi_rth_mplconfig.py` *assigns* `MPLCONFIGDIR` a fresh `mkdtemp` and deletes it at
+   exit — correct for `--onefile`, but it means every launch spent several seconds
+   rebuilding the font cache. Setting the variable in `app/runtime_hook.py` was silently
+   overwritten. `_app._use_persistent_matplotlib_cache()` does it instead: it runs from
+   `main()`, after every runtime hook and still before matplotlib's first import (which
+   happens inside `KdePlot.__init__`), and points the variable at a per-user cache
+   directory keyed by a hash of the bundle's location — so moving the app to
+   `/Applications` costs one rebuild instead of leaving stale font paths behind. The
+   runtime hook is left with the three things nothing else contests: `QT_API=pyqt6`,
+   `MPLBACKEND=QtAgg`, `NAPARI_ASYNC=0`. Worth 13.1 s → 2.1 s on every launch but the
+   first, measured with `--self-test` on the same bundle.
+8. **Package a `.app` with `ditto -c -k --keepParent`, never `zip -r`.** The bundle
+   contains symlinked Qt frameworks and an ad-hoc code signature; `zip` flattens the
+   first and invalidates the second, and macOS then calls the app damaged.
+9. **PyInstaller ad-hoc signs on Apple Silicon**, which is enough to *run* but not enough
+   for Gatekeeper on a downloaded file: the user needs one right-click ▸ Open, or
+   `xattr -dr com.apple.quarantine`. Windows needs More info ▸ Run anyway. Real signing
+   means a paid Apple Developer ID and an EV certificate.
+
+Two checks, and they cover different failures: `--self-test` builds the GUI headless and
+asserts the KDE canvas, a zlib TIFF decode through the bundled imagecodecs, and npe2
+discovery — the three things that break *only* when frozen. `--smoke [secs]` opens a real
+window, runs `napari.run()`, and closes itself, which is the only path that exercises the
+event loop. CI runs the first (under `xvfb-run` on Linux); run the second locally after a
+napari upgrade.
 
 - Two assertions on the built wheel encode §5.2 and §9: `napari_multiplex_thresholder/napari.yaml`
   must be **inside** the wheel, and the wheel must be `py3-none-any`. A missing manifest

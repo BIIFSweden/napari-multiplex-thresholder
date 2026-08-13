@@ -10,6 +10,7 @@ dist/
 *.egg-info/
 .eggs/
 wheels/
+CLAUDE.md
 
 # Virtual environments. `.venv/` is the uv environment this repo creates for local
 # testing (see README, "For development"); it is never committed.

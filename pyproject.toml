@@ -55,11 +55,20 @@ dependencies = [
 # zarr 2, neither of which this was tested against.
 app = ["napari[all]>=0.5"]
 test = ["pytest"]
+# Everything needed to freeze the double-clickable app (app/MultiplexThresholder.spec).
+# Not a runtime dependency of anything: only CI and whoever builds a release use it.
+bundle = ["napari[all]>=0.5", "pyinstaller>=6.11"]
 
 [project.urls]
 Homepage = "https://github.com/BIIFSweden/napari-multiplex-thresholder"
 Repository = "https://github.com/BIIFSweden/napari-multiplex-thresholder"
 Issues = "https://github.com/BIIFSweden/napari-multiplex-thresholder/issues"
+
+[project.scripts]
+# The same entry point the frozen app runs, for anyone who pip-installed instead:
+# opens napari with both docks already in place. `--self-test` builds the GUI headless
+# and checks it, `--version` prints the version.
+multiplex-thresholder = "napari_multiplex_thresholder._app:main"
 
 [project.entry-points."napari.manifest"]
 napari-multiplex-thresholder = "napari_multiplex_thresholder:napari.yaml"

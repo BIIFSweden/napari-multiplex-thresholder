@@ -3,3 +3,6 @@ include LICENSE
 include README.md
 include src/napari_multiplex_thresholder/napari.yaml
 recursive-include tests *.py
+# The desktop-app recipe, so an sdist can build the double-clickable app too.
+include app/MultiplexThresholder.spec
+recursive-include app *.py

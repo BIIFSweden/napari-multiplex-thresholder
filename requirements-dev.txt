@@ -11,3 +11,4 @@
 pytest             # optional: both test files also run as plain scripts
 build              # python -m build
 twine              # twine check dist/*
+pyinstaller>=6.11  # pyinstaller app/MultiplexThresholder.spec --noconfirm
