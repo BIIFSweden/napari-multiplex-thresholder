@@ -1,21 +1,21 @@
-"""Drives the real widgets against the real tiles in data/new/, offscreen.
+"""Drives the real widgets against real tiles in the study data folder, offscreen.
 
 This is the test that matters: it opens a napari viewer, loads a tile through the
 Load button's code path, walks channels with Next/Back, checks the channel slider
 and the dropdown stay in step, applies a threshold and verifies that cells below it
-actually disappear from the label layer, then checks the CSV notebook 6 will read.
+actually disappear from the label layer, then checks the CSV the downstream analysis
+will read.
 
 It also measures resident memory across the whole thing, because the point of the
-rewrite is that a tile no longer costs 18 GB (CLAUDE.md §6b).
+rewrite is that a tile no longer has to be held in memory in full.
 
-    ../7904_cpose4/bin/python tests/test_widget_real_data.py
 
 NOT with QT_QPA_PLATFORM=offscreen: napari renders through vispy, the offscreen Qt
 platform provides no OpenGL context, and the process dies with SIGSEGV before the
 first assertion. `napari.Viewer(show=False)` on macOS gets a real context without
 putting a window on screen, which is what this uses.
 
-Skips itself if data/new/ is not present.
+Skips itself if the data folder is not present.
 """
 
 from __future__ import annotations
@@ -31,12 +31,13 @@ import pandas as pd
 os.environ.pop("QT_QPA_PLATFORM", None)
 
 def find_data() -> Path:
-    """Locate the 7904 project's `data/new/`, wherever this package now lives.
+    """Locate the study's data folder, wherever this package now lives.
 
-    This repository is developed both inside the 7904 monorepo and standalone, so the
-    data cannot be assumed to sit a fixed number of levels up. Order: an explicit
-    GATING_TEST_DATA, then any `data/new` in this file's ancestors or their siblings.
-    Returns a non-existent path if nothing is found, and main() then skips.
+    This repository is developed both inside a larger analysis repository and
+    standalone, so the data cannot be assumed to sit a fixed number of levels up.
+    Order: an explicit GATING_TEST_DATA, then the conventional data folder in this
+    file's ancestors or their siblings. Returns a non-existent path if nothing is
+    found, and main() then skips.
     """
     override = os.environ.get("GATING_TEST_DATA")
     if override:
@@ -55,8 +56,8 @@ QUANT = DATA / "quantification_combined"
 MASKS = DATA / "segmentation_combined"
 
 
-def _notebook5_slider_bound() -> int:
-    """The n_cells notebook 5's slider maximum was derived from: the largest tile."""
+def _pooled_slider_bound() -> int:
+    """The n_cells an earlier global slider maximum was derived from: the largest tile."""
     best = 0
     for f in sorted(QUANT.glob("*_quant.csv")):
         best = max(best, len(pd.read_csv(f, usecols=[0])))
@@ -67,7 +68,7 @@ def peak_gb() -> float:
     """Peak resident set size. Monotonic — a high-water mark, never current usage.
 
     `resource` is Unix-only; this whole file is a developer test that needs the real
-    data in data/new/, so on Windows the memory figures are simply reported as nan
+    data, so on Windows the memory figures are simply reported as nan
     rather than making the run fail.
     """
     try:
@@ -159,7 +160,7 @@ def main() -> int:
           f"{stems[0]} …")
 
     # smallest tile, so the test is quick but still real data
-    target = os.environ.get("GATING_TEST_TILE", "PPC024_Sharprun_3_Scan1_tile2_with_cd20")
+    target = os.environ.get("GATING_TEST_TILE", "")
     index = stems.index(target) if target in stems else 0
     widget.tile_combo.setCurrentIndex(index)
     widget.load_tile()
@@ -203,7 +204,7 @@ def main() -> int:
     # test has not yet made copies of its own
     steady = rss_gb()
 
-    # --- slider range is this channel's own, not a pooled maximum (BUG-19) ---
+    # --- slider range is this channel's own, not a pooled maximum ---
     channel = widget.channel
     values = widget.transformed(channel)
     lo, hi = _core.channel_range(values)
@@ -212,15 +213,15 @@ def main() -> int:
     assert widget.value_box.minimum() <= lo, (widget.value_box.minimum(), lo)
     assert widget.value_box.maximum() >= hi, (widget.value_box.maximum(), hi)
     assert widget.value_box.maximum() - hi < 1e-3 and lo - widget.value_box.minimum() < 1e-3
-    # Notebook 5's bound was one global max over all tiles, taken from a frame that
-    # still had the melted-in n_cells column: max over tiles of arcsinh(n_cells).
-    # Report both so the difference is visible on real data (BUG-19).
-    notebook_bound = float(np.arcsinh(_notebook5_slider_bound()))
+    # The earlier bound was one global max over all tiles, taken from a frame that
+    # still had a cell-count column mixed in: max over tiles of arcsinh(n_cells).
+    # Report both so the difference is visible on real data.
+    pooled_bound = float(np.arcsinh(_pooled_slider_bound()))
     print(f"ok   slider range for {channel}: {lo:.4f}..{hi:.4f}  "
-          f"(notebook 5 used one global bound of arcsinh(max n_cells) = {notebook_bound:.4f} "
-          f"for every channel and tile)")
+          f"(an earlier version used one global bound of arcsinh(max n_cells) = "
+          f"{pooled_bound:.4f} for every channel and tile)")
 
-    # --- Run hides sub-threshold cells, exactly like the notebook ---
+    # --- Run hides sub-threshold cells, exactly as before ---
     plane_before = widget.labels.plane(widget.channel_index)
     labels_before = np.unique(plane_before)
     widget.value_box.setValue(float(np.nanmedian(values)))
@@ -260,7 +261,7 @@ def main() -> int:
     assert np.isnan(widget.table.get(stem, channel))
     print("ok   un-gate restored every label on screen and set the CSV cell to NaN")
 
-    # --- gate three channels and check the CSV notebook 6 will read ---
+    # --- gate three channels and check the CSV the downstream analysis will read ---
     gated = {}
     for c in (0, 1, 2):
         viewer.dims.set_current_step(0, c)
@@ -280,14 +281,14 @@ def main() -> int:
         assert widget.table.get(stem, name) == thr
     unset = frame[stem].isna().sum()
     assert unset == n_channels - 3, unset
-    print(f"ok   CSV: rows=markers, cols=tiles, 3 gated, {unset} still NaN (BUG-04 fix)")
+    print(f"ok   CSV: rows=markers, cols=tiles, 3 gated, {unset} still NaN")
 
     meta = _core.ThresholdTable.meta_path(csv_path)
     assert meta.exists()
     import json
 
     assert json.loads(meta.read_text())["cofactor"] == 1.0
-    print(f"ok   sidecar {meta.name} records cofactor 1 (notebook 6's space)")
+    print(f"ok   sidecar {meta.name} records cofactor 1 (the space the downstream analysis works in)")
 
     # --- export streams a gated mask ---
     out, empty = _core.export_gated_mask(
@@ -353,7 +354,7 @@ def main() -> int:
           f"{steady:.2f} GB after walking channels, {peak:.2f} GB at the end; "
           f"high-water {high_water:.2f} GB (transient int64 page decodes, plus this "
           f"test's own full-plane copies and the export)")
-    print(f"        notebook 5 held {full_stack_gb:.1f} GB for this tile's mask alone, "
+    print(f"        an eager implementation would hold {full_stack_gb:.1f} GB for this tile's mask alone, "
           f"plus a second copy")
     viewer.close()
     return 0

@@ -1,10 +1,4 @@
-"""Manual per-channel gating for project 7904, as two napari dock widgets.
-
-Rebuilt from the magicgui widget in `new_notebooks/5_apply_manual_threshold.ipynb`:
-same job — pick a tile, pick a channel, drag an arcsinh threshold, watch cells
-below it disappear, save the value — with the notebook's memory behaviour and its
-threshold-bookkeeping bugs left behind.
-
+"""
     Plugins ▸ Multiplex Thresholder          # in napari
     from napari_multiplex_thresholder import make_gating_widget   # from a script
 

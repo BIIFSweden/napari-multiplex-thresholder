@@ -3,7 +3,7 @@
 #
 #     pip install -r requirements-dev.txt
 #     python tests/test_core.py              # synthetic, no Qt, no display
-#     python tests/test_widget_real_data.py  # real tiles; skips itself without data/new/
+#     python tests/test_widget_real_data.py  # real tiles; skips itself without the data
 #     python -m build                        # -> dist/*.whl, dist/*.tar.gz
 
 -r requirements.txt

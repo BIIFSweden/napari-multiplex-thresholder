@@ -1,9 +1,9 @@
 """Lazy (C, H, W) stacks so napari's channel slider works without loading a tile.
 
-Notebook 5 read whole stacks: `masks = [io.imread(f)[1:] for f in mask_files]` plus
-a full second copy in `all_masks_src`, plus every raw image handed to napari — 164 GB
-resident for the six legacy tiles, of which 72.8 GB is the mask list and another
-72.8 GB its copy (CLAUDE.md §6b).
+An earlier implementation read whole stacks — every mask eagerly, a full second copy
+of all of them, and every raw image handed to napari — so resident memory scaled with
+the number of tiles opened rather than with what is on screen, and reached hundreds of
+gigabytes.
 
 Nothing needs that. The widget only ever displays one (tile, channel) plane, and a
 single page read from these deflate-compressed TIFFs takes ~21 ms. So each layer is
@@ -33,7 +33,7 @@ DEFAULT_CACHE_PLANES = 2
 LABEL_CACHE_PLANES = 1
 
 #: napari's Labels layer wants a compact integer dtype. Combined masks are written
-#: int64 (BUG-08) but the largest label in this project is ~1e6, so uint32 is ample
+#: int64, but per-tile label values fit comfortably in 32 bits, so uint32 is ample
 #: and halves what crosses into the viewer.
 LABEL_DTYPE = np.dtype(np.uint32)
 
@@ -138,9 +138,9 @@ class LazyGatedLabels:
 
     `set_lut(channel, lut)` swaps in a boolean label→keep table; the plane the
     slider is on is then rebuilt on the next refresh, so sub-threshold cells vanish
-    exactly as they do in notebook 5. `set_lut(channel, None)` shows everything
-    again. The on-disk plane is always the source, so gating is never cumulative
-    and there is no second full copy to hold (notebook 5's `all_masks_src`).
+    exactly as they did in the earlier implementation. `set_lut(channel, None)` shows
+    everything again. The on-disk plane is always the source, so gating is never
+    cumulative and there is no second full copy of the masks to hold.
     """
 
     def __init__(self, mask_path, n_channels: int, plane_offset: int = 1):

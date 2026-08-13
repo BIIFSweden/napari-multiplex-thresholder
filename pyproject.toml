@@ -1,7 +1,7 @@
 [build-system]
-# setuptools rather than hatchling: it is what the project's 7904_cpose4 venv already
-# has, so the plugin installs there with --no-build-isolation, no network and no new
-# build dependency in an environment two Cellpose majors have to keep working in.
+# setuptools rather than hatchling: it is what a scientific analysis environment
+# usually already has, so the plugin installs there with --no-build-isolation, no
+# network access and no new build dependency added to a pinned environment.
 requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
@@ -14,7 +14,7 @@ requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "SciLifeLab BioImage Informatics Unit" }]
-keywords = ["napari", "spatial proteomics", "phenocycler", "gating", "thresholding"]
+keywords = ["napari", "spatial proteomics", "multiplexed imaging", "gating", "thresholding"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Framework :: napari",

@@ -1,24 +1,4 @@
-"""Everything that does not need Qt: file discovery, quantification, thresholds.
 
-Kept free of napari and Qt imports so it can be tested headless and reasoned
-about on its own. `_widget.py` is the only place that knows about the GUI.
-
-Design notes that matter for compatibility with the rest of project 7904:
-
-* Threshold CSV layout is fixed by `6_statistics_manual_gating.ipynb`, which does
-  `pd.read_csv(path, index_col=0)` and then iterates `thresholds.columns` as tile
-  stems and `thresholds.index` as marker names, comparing
-  `np.arcsinh(quant[marker]) >= thr`. Rows are markers, columns are tiles, the
-  index has no name, and nothing else may appear in the file — a `#` comment line
-  would be read as data. Provenance therefore goes in a sidecar `.meta.json`.
-* An ungated (tile, channel) is **NaN**, not 0. `NaN >= x` is False, so notebook 6
-  calls every cell negative for that marker instead of silently positive, which is
-  the BUG-04 failure mode reversed to the safe direction. `unset_pairs()` exists so
-  the UI can say what is still missing.
-* Marker `m` (0-based, DAPI excluded) lives in plane `m + 1` of the combined mask;
-  plane 0 is the empty DAPI slot. `plane_for_channel` detects the alternative
-  layout rather than assuming.
-"""
 
 from __future__ import annotations
 
@@ -33,14 +13,14 @@ import numpy as np
 import pandas as pd
 import tifffile
 
-# macOS AppleDouble sidecars: on the exFAT drives this project uses they sit next
-# to the real files and carry the same extension.
+# macOS AppleDouble sidecars: on exFAT volumes they sit next to the real files and
+# carry the same extension.
 APPLEDOUBLE = "._"
 
 MASK_SUFFIX = "_entire_mask.tif"
 QUANT_SUFFIX = "_quant.csv"
 
-#: Cofactor that keeps this widget's numbers comparable with notebooks 5 and 6.
+#: Cofactor that keeps this widget's numbers comparable with the downstream analysis.
 NOTEBOOK_COFACTOR = 1.0
 
 
@@ -75,9 +55,9 @@ class TileRef:
 def discover_tiles(tiles_dir, quant_dir, mask_dir) -> tuple[list[TileRef], list[str]]:
     """Tiles that have all three files, plus a human-readable list of what's missing.
 
-    Matching is by stem, never by position in two directory listings — that is
-    BUG-13 in CLAUDE.md, where one stray file silently shifts every mask against
-    its image.
+    Matching is by stem, never by position in two directory listings: an earlier
+    version paired them positionally, where one stray file silently shifts every
+    mask against its image.
     """
     tiles_dir, quant_dir, mask_dir = Path(tiles_dir), Path(quant_dir), Path(mask_dir)
     found: list[TileRef] = []
@@ -101,8 +81,8 @@ class Quantification:
     """Per-cell mean intensity for one tile: labels, channel names, values.
 
     `values` is (n_cells, n_channels) and keeps NaN, which means "this cell has no
-    pixels in the compartment this marker is measured in" (BUG-05). NaN never
-    passes `>= threshold`, so such cells are simply never called positive.
+    pixels in the compartment this marker is measured in". NaN never passes
+    `>= threshold`, so such cells are simply never called positive.
     """
 
     stem: str
@@ -141,10 +121,11 @@ def load_quantification(quant_path, stem: str | None = None) -> Quantification:
 def transform(values: np.ndarray, cofactor: float = NOTEBOOK_COFACTOR) -> np.ndarray:
     """`arcsinh(x / cofactor)`.
 
-    cofactor 1 reproduces notebooks 5 and 6 (`np.arcsinh(quant)`), which is what
-    every saved threshold in `data/new/manual_thresholds_*.csv` is expressed in.
-    cofactor 5 matches `*asinh_normalised.h5ad` and therefore ASTIR. The two are
-    not interchangeable; whichever is used is recorded in the sidecar.
+    cofactor 1 is plain `np.arcsinh(quant)`, the space the downstream analysis works
+    in and the one every previously saved `manual_thresholds_*.csv` is expressed in.
+    cofactor 5 matches asinh-normalised AnnData exports and the cell-typing tools
+    that read them. The two are not interchangeable; whichever is used is recorded
+    in the sidecar.
     """
     if cofactor <= 0:
         raise ValueError(f"cofactor must be > 0, got {cofactor}")
@@ -154,10 +135,10 @@ def transform(values: np.ndarray, cofactor: float = NOTEBOOK_COFACTOR) -> np.nda
 def channel_range(transformed: np.ndarray) -> tuple[float, float]:
     """(min, max) of one channel, NaN-safe, for the slider bounds.
 
-    Per channel and per tile on purpose. Notebook 5 used one global maximum taken
-    from a frame that still contained the melted-in `n_cells` column, so its slider
-    topped out at `arcsinh(cell count)` — BUG-19, which can put the correct
-    threshold out of reach entirely.
+    Per channel and per tile on purpose. An earlier version used one global maximum,
+    taken from a frame that still had a cell-count column mixed into it, so its
+    slider topped out at `arcsinh(cell count)` — which can put the correct threshold
+    out of reach entirely.
     """
     if transformed.size == 0 or np.all(np.isnan(transformed)):
         return 0.0, 1.0
@@ -172,9 +153,9 @@ def keep_lut(
 ) -> np.ndarray:
     """Boolean lookup table over label IDs: True where the cell passes `threshold`.
 
-    Indexing a LUT with the label image is what notebook 6 does and is far faster
-    than `np.isin` at these sizes. NaN fails the comparison, so unmeasured cells
-    drop out.
+    Indexing a LUT with the label image is what the downstream analysis does and is
+    far faster than `np.isin` at these sizes. NaN fails the comparison, so unmeasured
+    cells drop out.
     """
     lut = np.zeros(max_label + 1, dtype=bool)
     if labels.size == 0:
@@ -191,8 +172,8 @@ def positive_fraction(transformed: np.ndarray, threshold: float) -> float:
     """Fraction of *measured* cells at or above `threshold`, as a percentage.
 
     Denominator is the cells this channel actually has an intensity for — not the
-    label count of the whole multi-plane mask, which is what notebook 5 divided by
-    (BUG-22).
+    label count of the whole multi-plane mask, which is what an earlier version
+    divided by.
     """
     measured = ~np.isnan(transformed)
     n = int(measured.sum())
@@ -300,7 +281,7 @@ class ThresholdTable:
 
     def __init__(self, frame: pd.DataFrame):
         self.frame = frame
-        self.frame.index.name = None  # notebook 6 reads with index_col=0
+        self.frame.index.name = None  # the downstream analysis reads with index_col=0
 
     # --- construction ---
 
@@ -327,7 +308,7 @@ class ThresholdTable:
 
     def set(self, tile: str, channel: str, value: float) -> None:
         # Explicit membership check: pandas .loc/.at silently *enlarge* on a missing
-        # key, which is how a name drift would quietly add junk rows (BUG-23).
+        # key, which is how a name drift would quietly add junk rows.
         if channel not in self.frame.index:
             raise KeyError(f"channel {channel!r} is not in the threshold table")
         if tile not in self.frame.columns:
@@ -361,8 +342,8 @@ class ThresholdTable:
     def save(self, path, meta: dict | None = None) -> Path:
         """Write atomically, and drop provenance next to it.
 
-        Atomic because notebook 5 truncates and rewrites the whole CSV on every
-        slider commit, so an interrupt there can leave an empty file (BUG-15).
+        Atomic because an earlier version truncated and rewrote the whole CSV on
+        every slider commit, so an interrupt there can leave an empty file.
         """
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -384,7 +365,7 @@ class ThresholdTable:
         return Path(csv_path).with_suffix(Path(csv_path).suffix + ".meta.json")
 
     def write_meta(self, csv_path, meta: dict) -> Path:
-        """Sidecar provenance. The CSV itself must stay pure numbers for notebook 6."""
+        """Sidecar provenance. The CSV itself must stay pure numbers for the reader."""
         target = self.meta_path(csv_path)
         payload = {
             "written": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -414,12 +395,13 @@ def export_gated_mask(
     """Write a (C, H, W) mask where each plane keeps only cells that passed.
 
     Streams: one plane is read, filtered and handed to tifffile at a time, so peak
-    memory is two planes rather than the 5-18 GB the whole stack would take.
-    `tifffile.imwrite` accepts an iterator when given `shape` and `dtype`.
+    memory is two planes rather than the whole stack, which for a label mask of this
+    shape runs to gigabytes. `tifffile.imwrite` accepts an iterator when given
+    `shape` and `dtype`.
 
     A plane with no LUT — an ungated channel, or the empty DAPI slot — is written
-    as zeros, which is what notebook 6 produces from a NaN threshold. The indices
-    of those planes are returned so the caller can say so out loud.
+    as zeros, which is what the downstream analysis produces from a NaN threshold.
+    The indices of those planes are returned so the caller can say so out loud.
     """
     mask_path, out_path = Path(mask_path), Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -442,7 +424,7 @@ def export_gated_mask(
             yield np.where(keep, plane, 0).astype(out_dtype, copy=False)
 
     # tifffile takes an iterator when given shape and dtype, so only one plane is
-    # ever in memory instead of the 5-18 GB the whole stack would need.
+    # ever in memory instead of the whole multi-gigabyte stack.
     #
     # photometric="minisblack" is not cosmetic: without it tifffile treats a small
     # leading axis as samples-per-pixel and tries to write one interleaved page,

@@ -190,18 +190,17 @@ jobs:
           print(mf.name, '|', mf.display_name, '|', widgets, '|', cmd)
           assert widgets == ['Multiplex Thresholder'], widgets
           # A class contribution, never a factory function: napari injects the viewer
-          # only into classes (CLAUDE.md 5.1).
+          # only into classes, and calls a function contribution with no arguments.
           assert cmd.endswith(':GatingControls'), cmd
           "
 
-      # Synthetic fixtures, no Qt, no napari viewer, no display. Runs as a script
-      # because the project's own environment has no pytest.
+      # Synthetic fixtures, no Qt, no napari viewer, no display. Runs as a script so it
+      # also works in an analysis environment that has no pytest.
       - name: Core tests
         run: python tests/test_core.py
 
   # tests/test_widget_real_data.py is not run here: it needs a real OpenGL context and
-  # the project's data/new/ tiles, neither of which a runner has. It stays a local gate
-  # (README, "Tests").
+  # real tiles, neither of which a runner has. It stays a local gate (README, "Tests").
   summary:
     name: build ok
     needs: [build, test]

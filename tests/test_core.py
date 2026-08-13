@@ -1,7 +1,7 @@
 """Logic tests for napari_multiplex_thresholder._core — no Qt, no napari, synthetic data.
 
-Runs under pytest, or directly (`python tests/test_core.py`) so it works in the
-7904_cpose4 environment, which has no pytest installed.
+Runs under pytest, or directly (`python tests/test_core.py`) so it also works in an
+analysis environment that has no pytest installed.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import tifffile
 
 from napari_multiplex_thresholder import _core
 
-CHANNELS = ["iNOS", "CD20", "CD3e"]
+CHANNELS = ["MarkerA", "MarkerB", "MarkerC"]
 
 
 def _fixture(root: Path, stems=("T_tile0", "T_tile1"), n_cells=40, shape=(64, 80)):
@@ -29,7 +29,7 @@ def _fixture(root: Path, stems=("T_tile0", "T_tile1"), n_cells=40, shape=(64, 80
     for t, stem in enumerate(stems):
         labels = np.arange(1, n_cells + 1) + t * 1000  # offset, as the pipeline does
         values = rng.uniform(1, 5000, size=(n_cells, len(CHANNELS)))
-        values[0, 1] = np.nan  # a cell with no pixels in this compartment (BUG-05)
+        values[0, 1] = np.nan  # a cell with no pixels in this compartment
         df = pd.DataFrame(values, columns=CHANNELS)
         df.insert(0, "label", labels)
         df.to_csv(quant / f"{stem}{_core.QUANT_SUFFIX}", index=False)
@@ -50,7 +50,7 @@ def _fixture(root: Path, stems=("T_tile0", "T_tile1"), n_cells=40, shape=(64, 80
 def test_discovery_matches_on_stem():
     with tempfile.TemporaryDirectory() as tmp:
         tiles, quant, masks = _fixture(Path(tmp))
-        # a stray file in masks/ must not shift anything (BUG-13)
+        # a stray file in masks/ must not shift anything
         (masks / "zzz_stray_entire_mask.tif").write_bytes(b"")
         found, problems = _core.discover_tiles(tiles, quant, masks)
         assert [t.stem for t in found] == ["T_tile0", "T_tile1"]
@@ -69,17 +69,17 @@ def test_quantification_and_transform():
         _, quant, _ = _fixture(Path(tmp))
         q = _core.load_quantification(quant / "T_tile0_quant.csv")
         assert q.channels == CHANNELS and q.n_cells == 40
-        assert q.nan_count("CD20") == 1 and q.nan_count("iNOS") == 0
+        assert q.nan_count("MarkerB") == 1 and q.nan_count("MarkerA") == 0
 
-        raw = q.column("iNOS")
+        raw = q.column("MarkerA")
         assert np.allclose(_core.transform(raw, 1.0), np.arcsinh(raw))
         assert np.allclose(_core.transform(raw, 5.0), np.arcsinh(raw / 5.0))
-        # cofactor 1 is the notebook 5/6 space
+        # cofactor 1 is the space the downstream analysis works in
         assert _core.NOTEBOOK_COFACTOR == 1.0
 
 
 def test_channel_range_is_per_channel():
-    """BUG-19: the range must come from this channel, not from a pooled maximum."""
+    """The range must come from this channel, not from a pooled maximum."""
     values = np.array([1.0, 2.0, 9.0, np.nan])
     assert _core.channel_range(values) == (1.0, 9.0)
     assert _core.channel_range(np.array([np.nan, np.nan])) == (0.0, 1.0)
@@ -117,17 +117,17 @@ def test_threshold_table_nan_semantics_and_atomic_save():
         path = Path(tmp) / "manual_thresholds_test.csv"
         table = _core.ThresholdTable.load(path, CHANNELS, ["T_tile0", "T_tile1"])
         assert table.frame.shape == (3, 2)
-        assert table.frame.isna().all().all()  # unset is NaN, never 0 (BUG-04)
+        assert table.frame.isna().all().all()  # unset is NaN, never 0
         assert len(table.unset_pairs()) == 6
         assert table.gated_count("T_tile0") == (0, 3)
 
-        table.set("T_tile0", "CD20", 8.25)
-        assert table.get("T_tile0", "CD20") == 8.25
-        assert np.isnan(table.get("T_tile1", "CD20"))
+        table.set("T_tile0", "MarkerB", 8.25)
+        assert table.get("T_tile0", "MarkerB") == 8.25
+        assert np.isnan(table.get("T_tile1", "MarkerB"))
         assert table.gated_count("T_tile0") == (1, 3)
 
-        # a name that is not in the grid must raise, not silently enlarge (BUG-23)
-        for bad in (("T_tile0", "NOPE"), ("NOPE", "CD20")):
+        # a name that is not in the grid must raise, not silently enlarge
+        for bad in (("T_tile0", "NOPE"), ("NOPE", "MarkerB")):
             try:
                 table.set(*bad, 1.0)
             except KeyError:
@@ -139,17 +139,17 @@ def test_threshold_table_nan_semantics_and_atomic_save():
         assert path.exists()
         assert not list(path.parent.glob(".*tmp*")), "temp file left behind"
 
-        # exactly what notebook 6 does with it
+        # exactly what the downstream analysis does with it
         back = pd.read_csv(path, index_col=0)
         assert list(back.index) == CHANNELS and list(back.columns) == ["T_tile0", "T_tile1"]
-        assert back.at["CD20", "T_tile0"] == 8.25 and np.isnan(back.at["CD20", "T_tile1"])
+        assert back.at["MarkerB", "T_tile0"] == 8.25 and np.isnan(back.at["MarkerB", "T_tile1"])
 
         meta = json.loads(_core.ThresholdTable.meta_path(path).read_text())
         assert meta["cofactor"] == 1.0 and len(meta["unset"]) == 5
 
         # reloading keeps what was set and widens for a new tile
         again = _core.ThresholdTable.load(path, CHANNELS, ["T_tile0", "T_tile1", "T_tile2"])
-        assert again.get("T_tile0", "CD20") == 8.25
+        assert again.get("T_tile0", "MarkerB") == 8.25
         assert list(again.frame.columns) == ["T_tile0", "T_tile1", "T_tile2"]
 
 
@@ -162,7 +162,7 @@ def test_export_gated_mask_streams_and_zeroes_ungated():
         info = _core.inspect_mask(mask_path, len(CHANNELS))
 
         source = tifffile.imread(mask_path)
-        values = _core.transform(q.column("iNOS"), 1.0)
+        values = _core.transform(q.column("MarkerA"), 1.0)
         threshold = float(np.nanmedian(values))
         lut = _core.keep_lut(q.labels, values, threshold, int(source.max()))
 

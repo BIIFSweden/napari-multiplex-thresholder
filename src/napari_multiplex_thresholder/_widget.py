@@ -9,17 +9,16 @@ Dock 1 (`GatingControls`), top to bottom:
     threshold        arcsinh slider, exact value and cofactor on one line, Run below
 
 Dock 2 (`KdePlot`) shows the distribution for the current (tile, channel) with the
-threshold drawn on it, like cell 9 of `5_apply_manual_threshold.ipynb`.
+threshold drawn on it.
 
-Run applies the threshold the same way the notebook did — cells whose
+Run applies the threshold the way an interactive notebook widget would — cells whose
 `arcsinh(mean intensity)` is below it disappear from the label layer — and writes
-the value into the thresholds CSV in the layout `6_statistics_manual_gating.ipynb`
-expects. Differences from the notebook are deliberate and each fixes something
-recorded in CLAUDE.md §6b: the slider range is per (tile, channel) rather than
-`arcsinh(n_cells)` (BUG-19), ungated channels stay NaN instead of 0 (BUG-04),
-files are matched on stem (BUG-13), the CSV is written atomically (BUG-15), the
-percentage divides by the cells this channel measured (BUG-22), and nothing is
-loaded that is not on screen (BUG-08).
+the value into the thresholds CSV in the layout the downstream analysis expects.
+Six differences from that earlier approach are deliberate, and each one fixes a bug
+it had: the slider range is per (tile, channel) rather than `arcsinh(n_cells)`,
+ungated channels stay NaN instead of 0, files are matched on stem, the CSV is
+written atomically, the percentage divides by the cells this channel measured, and
+nothing is loaded that is not on screen.
 """
 
 from __future__ import annotations
@@ -52,7 +51,8 @@ from . import _core, _lazy
 
 #: The slider is an integer Qt slider mapped onto the channel's value range. Its
 #: own resolution, rather than a declared float `step` that the widget stack may or
-#: may not honour (BUG-21 — magicgui/superqt ignored notebook 5's `step: 1.0`).
+#: may not honour — magicgui/superqt ignored the float `step: 1.0` an earlier widget
+#: declared, and silently used its own resolution instead.
 SLIDER_STEPS = 2000
 
 #: The value and cofactor boxes sit on the slider's line, so they are sized to their
@@ -71,12 +71,12 @@ SETTINGS_ORG = "SciLifeLab-BIIF"
 SETTINGS_APP = "napari-multiplex-thresholder"
 
 PATH_FIELDS = [
-    ("tiles", "Raw tiles", "dir", "Folder with the per-tissue tiles (*.tif) from step 1."),
-    ("quant", "Quantification CSVs", "dir", "Folder with *_quant.csv from step 4."),
-    ("masks", "Multilayer masks", "dir", "Folder with *_entire_mask.tif from step 4."),
+    ("tiles", "Raw tiles", "dir", "Folder with the per-tissue tiles (*.tif)."),
+    ("quant", "Quantification CSVs", "dir", "Folder with *_quant.csv, one per tile."),
+    ("masks", "Multilayer masks", "dir", "Folder with *_entire_mask.tif, one per tile."),
     ("thresholds", "Thresholds CSV", "file",
      "Where thresholds are written. An existing file is loaded and extended, so "
-     "gating can be resumed. Layout matches 6_statistics_manual_gating.ipynb."),
+     "gating can be resumed. Layout matches what the downstream analysis reads."),
     ("export", "Gated mask output", "dir",
      "Only needed for 'Export gated mask'. Left empty, export is disabled."),
 ]
@@ -141,8 +141,8 @@ class KdePlot(QWidget):
     """Dock 2: the intensity distribution for the current (tile, channel).
 
     The curve is computed once per (tile, channel) and cached; moving the threshold
-    only moves the vertical line. Notebook 5 recomputed a seaborn KDE over up to
-    69 k values on every callback, which is where its lag came from.
+    only moves the vertical line. An earlier version recomputed a seaborn KDE over
+    every value on each callback, which is where its lag came from.
     """
 
     def __init__(self, dark: bool = True, parent=None):
@@ -408,8 +408,9 @@ class GatingControls(QWidget):
         self.cofactor_box.setValue(_core.NOTEBOOK_COFACTOR)
         self.cofactor_box.setFixedWidth(COFACTOR_BOX_WIDTH)
         self.cofactor_box.setToolTip(
-            "arcsinh(x / cofactor). 1 = notebooks 5 and 6, and what every saved "
-            "threshold in data/new/ is expressed in. 5 = the space ASTIR sees."
+            "arcsinh(x / cofactor). 1 = the space the downstream analysis works in, "
+            "and what previously saved thresholds are expressed in. 5 = the space "
+            "asinh-normalised exports and the cell-typing tools reading them use."
         )
         self.cofactor_box.valueChanged.connect(self._on_cofactor)
 
@@ -444,7 +445,7 @@ class GatingControls(QWidget):
             "Write a (C, H, W) TIFF beside the tiles in which every channel plane keeps "
             "only the cells that passed that channel's threshold — the gated masks as an "
             "actual file, zlib-compressed and streamed one plane at a time. Ungated "
-            "channels become empty planes. Nothing downstream needs it: notebook 6 "
+            "channels become empty planes. Nothing downstream needs it: the analysis "
             "re-derives its own thresholded masks from the CSV. It is for QC, for sharing, "
             "and for tools outside this pipeline."
         )
@@ -754,9 +755,9 @@ class GatingControls(QWidget):
     def _on_cofactor(self, value: float) -> None:
         self.cofactor_warning.setText(
             "" if value == 1 else
-            "⚠ notebook 6 assumes cofactor 1; thresholds saved with another cofactor "
-            "are not comparable with data/new/manual_thresholds_*.csv. The value is "
-            "recorded in the .meta.json sidecar."
+            "⚠ the downstream analysis assumes cofactor 1; thresholds saved with another "
+            "cofactor are not comparable with previously saved manual_thresholds_*.csv. "
+            "The value is recorded in the .meta.json sidecar."
         )
         if self.quant is not None:
             self._transformed = {}
@@ -830,8 +831,8 @@ class GatingControls(QWidget):
         if not out_dir:
             QMessageBox.warning(
                 self, "No output folder",
-                "Set 'Gated mask output' to export. Notebook 6 does not need this file — "
-                "it re-derives thresholded masks from the CSV.",
+                "Set 'Gated mask output' to export. The downstream analysis does not need "
+                "this file — it re-derives thresholded masks from the CSV.",
             )
             return
 
@@ -901,8 +902,8 @@ class GatingControls(QWidget):
         if done < total:
             # The standing version of the warning the Save button used to pop up.
             prefix += (
-                f"\n⚠ {total - done} channel(s) still NaN — notebook 6 will call every "
-                f"cell NEGATIVE for those"
+                f"\n⚠ {total - done} channel(s) still NaN — the downstream analysis will "
+                f"call every cell NEGATIVE for those"
             )
         self.status.setText(f"{prefix}\n{message}" if message else prefix)
 

@@ -33,12 +33,12 @@ coverage.xml
 .vscode/
 *.swp
 
-# Agent notes. Kept locally, not published: CLAUDE.md is the working record of why this
-# code is the way it is, and the README carries what a user needs.
+# Local working notes, kept out of the published tree; the README carries what a user
+# needs.
 CLAUDE.md
 
-# macOS. AppleDouble sidecars also appear beside real files on the project's exFAT
-# drives, which is why the package skips `._*` when listing tiles (CLAUDE.md §5.8).
+# macOS. AppleDouble sidecars also appear beside real files on exFAT volumes, which is
+# why the package skips `._*` when listing tiles.
 .DS_Store
 ._*
 .AppleDouble
