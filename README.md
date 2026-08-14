@@ -61,9 +61,9 @@ Python 3.11 is the floor (napari 0.8's own floor).
 
 ## Build on GitHub
 
-Both workflows are manual — nothing runs on a push. Open the repository's **Actions**
-tab, pick the workflow in the left sidebar, press **Run workflow**, choose the branch or
-tag, and start it:
+Nothing builds on a push to a branch. Open the repository's **Actions** tab, pick the
+workflow in the left sidebar, press **Run workflow**, choose the branch or tag, and start
+it:
 
 | workflow | input | result |
 |---|---|---|
@@ -83,21 +83,27 @@ Download the results from the finished run under **Artifacts**.
 
 ## Release
 
+Rehearse first, then tag. Both use the same build.
+
+**1. Try it.** Actions ▸ **Build desktop apps** ▸ Run workflow on `main`, platforms
+`all`. When it finishes, download the archives from the run's **Artifacts** and open the
+app. No release is created by a dispatched run.
+
+**2. Publish.** Make the version and the tag agree, then push the tag:
+
 ```bash
-# bump `version` in pyproject.toml, then:
+# `version` in pyproject.toml must equal the tag without its "v"
 git commit -am "release v0.1.1"
 git push
 git tag v0.1.1
 git push origin v0.1.1
 ```
 
-Then, on GitHub:
+The tag runs the same four builds and then a `release` job, which attaches all four
+platform archives **and** the wheel to a new GitHub Release, named after the tag, with
+download instructions and the commit log in the notes. Nothing to upload by hand.
 
-1. Run **Build desktop apps** (`all`) and **Build and test wheel** against the tag —
-   pick `v0.1.1` in the Run workflow ref dropdown. On a `v*` tag the wheel build also
-   fails if the tag disagrees with `pyproject.toml`.
-2. Download both runs' artifacts.
-3. **Releases ▸ Draft a new release**, choose the tag `v0.1.1`, and attach the four
-   platform archives and the wheel.
-
-Neither workflow publishes by itself, so the release is only what you attach.
+Guards, so a bad tag cannot become a release: the release job refuses to run if the tag
+disagrees with `version` in `pyproject.toml`, and it only runs at all if every platform
+built *and* passed its self-test. A tag containing `-` (`v0.2.0-rc1`) is marked as a
+pre-release.

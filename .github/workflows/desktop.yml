@@ -1,13 +1,19 @@
-# Freeze the double-clickable application, one artefact per platform. Manual only.
+# Freeze the double-clickable application, one artefact per platform — and on a tag,
+# publish them as a GitHub Release. Two ways in, same build:
 #
-# GitHub webpage ▸ Actions ▸ "Build desktop apps" ▸ Run workflow: choose the branch or
-# tag, choose which platforms, press the green button. Nothing here runs by itself.
+#   Rehearse   Actions ▸ "Build desktop apps" ▸ Run workflow. Pick a branch and which
+#              platforms; the archives appear under the run's **Artifacts**, where they
+#              can be downloaded and tried out. No release is created.
+#   Release    `git tag v0.1.1 && git push origin v0.1.1`. Every platform is built, and
+#              the `release` job attaches the archives plus the wheel to a new Release.
+#
+# Nothing else triggers this: no push to a branch, no pull request, no schedule.
 #
 # Each job installs napari and the plugin, runs PyInstaller over
 # app/MultiplexThresholder.spec, then **launches the frozen app with `--self-test`** —
 # the build is only useful if the bundle actually starts, and a freeze fails silently in
 # ways a wheel never does (missing Qt plugins, missing compiled TIFF decoders, an empty
-# Plugins menu). A job that cannot self-test fails.
+# Plugins menu). A job that cannot self-test fails, and a failed job blocks the release.
 #
 # Artefacts are ~700 MB-1.2 GB each, so the download is one platform at a time:
 #
@@ -21,7 +27,9 @@
 # see the README.
 name: Build desktop apps
 
-run-name: Desktop apps from ${{ github.ref_name }} (${{ inputs.platforms }})
+run-name: >-
+  ${{ github.ref_type == 'tag' && 'Release' || 'Desktop apps from' }}
+  ${{ github.ref_name }} (${{ inputs.platforms || 'all' }})
 
 on:
   workflow_dispatch:
@@ -36,6 +44,11 @@ on:
           - macos-x86_64     # Intel Macs
           - windows-x64
           - linux-x64
+  # A tag is the release trigger: the same jobs run, and the `release` job at the bottom
+  # then publishes what they produced. Nothing else starts this workflow.
+  push:
+    tags:
+      - "v*.*.*"
 
 concurrency:
   group: desktop-${{ github.ref }}
@@ -240,3 +253,91 @@ jobs:
           cat >> "$GITHUB_STEP_SUMMARY" <<EOF
           **$TARGET** — \`$FILE\` ($size), self-test passed.
           EOF
+
+  # Only on a tag, and only if every platform built and self-tested. A dispatched run
+  # stops above, with the archives on the run for download.
+  release:
+    name: Release (tags only)
+    if: github.ref_type == 'tag'
+    needs: freeze
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write     # the only job that needs to write to the repository
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # The tag names the release, so it must agree with what the package will report as
+      # its version. Cheaper to fail here than to explain a v0.2.0 release that installs
+      # as 0.1.0.
+      - name: Tag must match the version in pyproject.toml
+        run: |
+          version=$(python -c "import tomllib,pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$tag" != "$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match pyproject version $version — move the tag or bump the version"
+            exit 1
+          fi
+          echo "OK: $GITHUB_REF_NAME matches version $version"
+
+      # napari users install the plugin rather than the app, so the release carries the
+      # wheel too. Seconds to build, and it keeps the README's install instructions true.
+      - name: Build the wheel and sdist
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+          ls -lh dist/
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets      # one subfolder per platform artifact
+
+      - name: What is being released
+        run: find assets dist -type f | sort
+
+      - name: Release notes
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          cat > notes.md <<'EOF'
+          ### Which file do I want?
+
+          | your machine | download |
+          |---|---|
+          | Mac, Apple Silicon (M1–M4) | `…-macos-arm64.zip` |
+          | Mac, Intel | `…-macos-x86_64.zip` |
+          | Windows | `…-windows-x64.zip` |
+          | Linux | `…-linux-x64.tar.gz` |
+          | you already use napari | the `.whl` — `pip install <it>` |
+
+          Unzip and double-click. Nothing else to install: Python, Qt and napari are inside.
+
+          **First launch.** The app is not signed, so the system asks once.
+          On macOS use **right-click ▸ Open** instead of a double-click (and if there is no
+          *Open* button, run
+          `xattr -dr com.apple.quarantine "/Applications/Multiplex Thresholder.app"`).
+          On Windows choose **More info ▸ Run anyway**.
+          Keep the unzipped Windows and Linux folders together — the executable needs its
+          siblings.
+
+          Every archive here was built by this run and started successfully on its own
+          platform before being uploaded.
+          EOF
+          cat notes.md
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: Multiplex Thresholder ${{ github.ref_name }}
+          body_path: notes.md
+          generate_release_notes: true    # appends the commit log to the notes above
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}   # v0.2.0-rc1 -> pre-release
+          fail_on_unmatched_files: true
+          files: |
+            assets/**/*.zip
+            assets/**/*.tar.gz
+            dist/*.whl
+            dist/*.tar.gz
