@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "napari-multiplex-thresholder"
-version = "0.1.0"
+version = "1.0.0"
 description = "Napari widgets for manual per-channel gating of multiplexed tissue images"
 readme = "README.md"
 requires-python = ">=3.11"
