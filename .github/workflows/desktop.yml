@@ -126,6 +126,13 @@ jobs:
           python -m pip install ".[bundle]"
           python -c "import napari, PyInstaller; print('napari', napari.__version__, '| pyinstaller', PyInstaller.__version__)"
 
+      # The logic tests, on every platform this ships to, before spending ten minutes
+      # freezing code that does not pass them. Seconds to run — synthetic fixtures, no Qt,
+      # no display. This is the only place they run in CI now that there is no separate
+      # wheel workflow, and a failure here stops the build and therefore the release.
+      - name: Core tests
+        run: python tests/test_core.py
+
       - id: version
         run: echo "value=$(python -c "import tomllib,pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")" >> "$GITHUB_OUTPUT"
 

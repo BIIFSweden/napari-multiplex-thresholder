@@ -61,25 +61,20 @@ Python 3.11 is the floor (napari 0.8's own floor).
 
 ## Build on GitHub
 
-Nothing builds on a push to a branch. Open the repository's **Actions** tab, pick the
-workflow in the left sidebar, press **Run workflow**, choose the branch or tag, and start
-it:
+One workflow, **Build desktop apps**, and nothing builds on a push to a branch. Open the
+repository's **Actions** tab, press **Run workflow**, choose the branch and either `all`
+platforms or a single one while iterating — about 10 minutes per platform. Download the
+results from the finished run under **Artifacts**.
 
-| workflow | input | result |
-|---|---|---|
-| **Build desktop apps** | `all`, or one platform | the four double-clickable archives, ~10 min per platform |
-| **Build and test wheel** | `full` or `quick` | sdist + wheel, installed and tested on Ubuntu/Windows/macOS × Python 3.11–3.13 |
-
-Every desktop job launches what it just froze and runs its `--self-test`, so a bundle
-that cannot start fails the job. That check has two tiers: the packaging checks (bundled
-TIFF decoders, npe2 discovery, matplotlib's Qt backend) always have to pass, while the
-napari-viewer check needs a live OpenGL context and reports a visible SKIP where there is
-none. macOS and Linux runners have one — real, and xvfb with mesa — so they add
-`--require-gui`, which makes a missing context a failure. The Windows runner has no GPU
-driver, and software GL there is best-effort, so the viewer check may report a skip; check
-a Windows release candidate on real hardware with `--smoke`.
-
-Download the results from the finished run under **Artifacts**.
+Each job runs `tests/test_core.py` on its own platform, freezes the app, then **launches
+what it just froze** and runs its `--self-test`, so a bundle that cannot start fails the
+job. That check has two tiers: the packaging checks (bundled TIFF decoders, npe2 discovery,
+matplotlib's Qt backend) always have to pass, while the napari-viewer check needs a live
+OpenGL context and reports a visible SKIP where there is none. macOS and Linux runners have
+one — real, and xvfb with mesa — so they add `--require-gui`, which makes a missing context
+a failure. The Windows runner has no GPU driver, and software GL there is best-effort, so
+the viewer check may report a skip; check a Windows release candidate on real hardware with
+`--smoke`.
 
 ## Release
 

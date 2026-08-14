@@ -1,5 +1,5 @@
 # Development on top of a runtime install: tests, and the tooling that builds the
-# sdist and wheel the way .github/workflows/build.yml does.
+# sdist and wheel the way the release job in .github/workflows/desktop.yml does.
 #
 #     pip install -r requirements-dev.txt
 #     python tests/test_core.py              # synthetic, no Qt, no display
