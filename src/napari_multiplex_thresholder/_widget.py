@@ -60,6 +60,16 @@ SLIDER_STEPS = 2000
 VALUE_BOX_WIDTH = 90
 COFACTOR_BOX_WIDTH = 66
 
+#: The ◀ ▶ channel steppers are `QPushButton`s, not `QToolButton`s. Under napari's theme
+#: a QToolButton gets no frame and — measured by grabbing the widget and comparing pixels
+#: — *no pressed state at all*: clicking one changed nothing on screen. A QPushButton
+#: inherits the same border, hover and pressed styling as every other button in the app,
+#: so the arrows now look and behave like napari's own (delete-layer and friends).
+#: Fixed width, because a themed QPushButton's padding would otherwise make two arrows
+#: as wide as the dropdown; the spacing keeps them off the combo box.
+STEP_BUTTON_WIDTH = 34
+STEP_BUTTON_SPACING = 6
+
 #: Numbers are shown and typed the way they appear in the CSV: '.' decimals. Under a
 #: Swedish or German locale Qt renders 9.31 as "9,31" and can reject a typed '.',
 #: which for a threshold file that other code parses as floats is a real hazard.
@@ -365,18 +375,19 @@ class GatingControls(QWidget):
             "Marker to gate. Stays in step with the channel slider under the image."
         )
         self.channel_combo.currentIndexChanged.connect(self._on_channel_combo)
-        self.back_button = QToolButton()
-        self.back_button.setText("◀")
+        self.back_button = QPushButton("◀")
         self.back_button.setToolTip("Previous channel")
+        self.back_button.setFixedWidth(STEP_BUTTON_WIDTH)
         self.back_button.clicked.connect(lambda: self.step_channel(-1))
-        self.next_button = QToolButton()
-        self.next_button.setText("▶")
+        self.next_button = QPushButton("▶")
         self.next_button.setToolTip("Next channel")
+        self.next_button.setFixedWidth(STEP_BUTTON_WIDTH)
         self.next_button.clicked.connect(lambda: self.step_channel(+1))
         channel_grid.addWidget(self.channel_combo, 0, 0)
         channel_grid.addWidget(self.back_button, 0, 1)
         channel_grid.addWidget(self.next_button, 0, 2)
         channel_grid.setColumnStretch(0, 1)
+        channel_grid.setHorizontalSpacing(STEP_BUTTON_SPACING)
         outer.addWidget(channel_box)
 
         # --- threshold ---
