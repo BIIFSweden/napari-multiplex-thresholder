@@ -59,12 +59,17 @@ jobs:
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json, os
 
-          # runner images: macos-latest is Apple Silicon, macos-13 is the last Intel one.
+          # Runner images. macos-latest is Apple Silicon. For Intel it must be
+          # `macos-15-intel`: macos-13 was the old Intel image and has been fully
+          # unsupported since 4 December 2025, and a retired label does not error — the
+          # job simply queues for a runner that will never come, until GitHub cancels it.
+          # macos-15-intel is the last x86_64 image and goes away in August 2027; after
+          # that, drop this target rather than looking for a replacement.
           targets = {
-              "macos-arm64":  {"target": "macos-arm64",  "os": "macos-latest",   "archive": "zip"},
-              "macos-x86_64": {"target": "macos-x86_64", "os": "macos-13",       "archive": "zip"},
-              "windows-x64":  {"target": "windows-x64",  "os": "windows-latest", "archive": "zip"},
-              "linux-x64":    {"target": "linux-x64",    "os": "ubuntu-latest",  "archive": "tar"},
+              "macos-arm64":  {"target": "macos-arm64",  "os": "macos-latest",    "archive": "zip"},
+              "macos-x86_64": {"target": "macos-x86_64", "os": "macos-15-intel",  "archive": "zip"},
+              "windows-x64":  {"target": "windows-x64",  "os": "windows-latest",  "archive": "zip"},
+              "linux-x64":    {"target": "linux-x64",    "os": "ubuntu-latest",   "archive": "tar"},
           }
           wanted = os.environ.get("WANTED") or "all"
           chosen = list(targets.values()) if wanted == "all" else [targets[wanted]]
