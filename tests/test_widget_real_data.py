@@ -173,7 +173,10 @@ def main() -> int:
 
     # --- the raw tile is a lazy (C, H, W) stack: that is what gives the channel
     #     slider. The mask is one reused 2D buffer that napari aliases.
-    assert widget.image_layer.data.shape[0] == n_channels
+    offset = widget.mask_info.plane_offset  # 1 when plane 0 is the DAPI slot
+    assert widget.image_layer.data.shape[0] == n_channels + offset, (
+        "the raw stack must keep every plane of the file, DAPI included"
+    )
     assert widget.labels_layer.data.ndim == 2, widget.labels_layer.data.shape
     assert widget.labels_layer.data is widget._display
     assert np.shares_memory(widget._display, rendered_slice(widget.labels_layer)), (
@@ -181,25 +184,54 @@ def main() -> int:
     )
     plane_shape = widget.mask_info.shape[1:]
     full_stack_gb = n_channels * int(np.prod(plane_shape)) * 8 / 1e9
-    print(f"ok   raw tile is a ({n_channels}, H, W) dask stack; mask is one aliased "
+    print(f"ok   raw tile is a ({n_channels + offset}, H, W) dask stack; mask is one aliased "
           f"{plane_shape} buffer (an eager int64 stack would be {full_stack_gb:.1f} GB)")
+
+    # --- Load lands on the first marker, not on DAPI ---
+    assert widget.channel_index == 0 and widget.channel == widget.quant.channels[0]
+    assert viewer.dims.current_step[0] == offset, viewer.dims.current_step
+    print(f"ok   Load selected {widget.channel!r} at plane {offset} "
+          f"(plane 0 is DAPI, and stays visible)")
 
     # --- channel <-> slider stay in step, both directions ---
     widget.step_channel(+1)
     widget.step_channel(+1)
     assert widget.channel_index == 2
-    assert viewer.dims.current_step[0] == 2, viewer.dims.current_step
+    assert viewer.dims.current_step[0] == 2 + offset, viewer.dims.current_step
     widget.step_channel(-1)
-    assert widget.channel_index == 1 and viewer.dims.current_step[0] == 1
+    assert widget.channel_index == 1 and viewer.dims.current_step[0] == 1 + offset
     print(f"ok   Next/Back moved the napari channel slider to {viewer.dims.current_step[0]}")
 
     viewer.dims.set_current_step(0, 7)
-    assert widget.channel_index == 7, widget.channel_index
-    assert widget.channel == widget.quant.channels[7]
+    assert widget.channel_index == 7 - offset, widget.channel_index
+    assert widget.channel == widget.quant.channels[7 - offset]
     print(f"ok   dragging the slider moved the dropdown to {widget.channel!r}")
 
     widget.step_channel(-99)  # clamped, not an error
-    assert widget.channel_index == 7
+    assert widget.channel_index == 7 - offset
+
+    # --- the DAPI plane is shown like any other, and cannot be gated ---
+    if offset:
+        viewer.dims.set_current_step(0, 0)
+        assert widget.channel is None and widget.channel_index == -1
+        assert not widget.run_button.isEnabled(), "DAPI must not be gateable"
+        assert widget.labels_layer.data is widget._display  # still the same buffer
+        print("ok   plane 0 shows DAPI with the gating controls disabled")
+
+        # ...and the mask beside it is the nuclei segmentation, not the empty slot
+        shown = rendered_slice(widget.labels_layer)
+        assert widget.nuclei is not None, (
+            "no *_nuclei_mask.tif was found beside the masks folder, so the DAPI plane "
+            "has nothing to draw — check the data layout"
+        )
+        expected = _core.read_single_plane(widget.nuclei)
+        assert np.count_nonzero(shown), "the DAPI plane drew the empty mask slot"
+        assert np.array_equal(shown, expected.astype(shown.dtype))
+        print(f"ok   the DAPI plane draws {widget.nuclei.name} "
+              f"({np.count_nonzero(shown):,} label px), not the empty slot")
+        del expected
+        viewer.dims.set_current_step(0, 7)
+        assert widget.run_button.isEnabled()
     # steady state: a tile is loaded, several channels have been visited, and the
     # test has not yet made copies of its own
     steady = rss_gb()
@@ -263,7 +295,7 @@ def main() -> int:
 
     # --- gate three channels and check the CSV the downstream analysis will read ---
     gated = {}
-    for c in (0, 1, 2):
+    for c in (offset, offset + 1, offset + 2):
         viewer.dims.set_current_step(0, c)
         vals = widget.transformed(widget.channel)
         widget.value_box.setValue(float(np.nanpercentile(vals, 75)))
@@ -345,6 +377,13 @@ def main() -> int:
 
     # --- the KDE dock actually drew something; save it so it can be eyeballed ---
     assert kde.ax.lines, "KDE axes have no curve"
+    # napari appends a vertical stretch to dock content that does not ask for vertical
+    # space, which flattened the plot against the top of its dock. Expanding exempts it.
+    from qtpy.QtWidgets import QSizePolicy
+
+    assert kde.sizePolicy().verticalPolicy() == QSizePolicy.Expanding
+    assert kde.layout().count() == 1, "napari padded the KDE layout with a stretch"
+    assert kde.minimumHeight() >= 180
     png = out_dir / f"kde_{stem}.png"
     kde.figure.savefig(png, dpi=110, facecolor=kde.bg)
     print(f"ok   KDE rendered ({len(kde.ax.lines)} lines incl. threshold) -> {png}")

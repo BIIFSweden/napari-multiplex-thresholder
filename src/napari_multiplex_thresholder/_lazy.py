@@ -103,7 +103,13 @@ def _delayed_stack(fn, n: int, plane_shape, dtype) -> da.Array:
 
 
 class LazyImage:
-    """The raw tile as a lazy (C, H, W) stack, DAPI dropped."""
+    """The raw tile as a lazy (C, H, W) stack.
+
+    `drop_first=False` — what the widget uses — keeps the file's own plane order,
+    DAPI at 0 and the first marker at 1, so the canvas slider, the dropdown and the
+    mask plane are all the same number. `drop_first=True` hides DAPI and shifts the
+    markers down to start at 0.
+    """
 
     def __init__(self, tile_path, drop_first: bool = True):
         self.reader = PlaneReader(tile_path)
@@ -118,18 +124,23 @@ class LazyImage:
             self.plane, self.n_channels, self.reader.plane_shape, self.reader.dtype
         )
 
-    #: Stride used when estimating contrast limits. np.percentile sorts a full copy
-    #: of what it is given — 224 MB for one plane of the largest tile — and every
-    #: 16th pixel gives the same 1st/99.9th percentile to display precision.
-    CONTRAST_STRIDE = 4
+    def contrast_limits(self, channel: int) -> tuple[float, float]:
+        """napari's *auto-contrast once* for one plane: that plane's own min and max.
 
-    def contrast_limits(self, channel: int, low=1.0, high=99.9) -> tuple[float, float]:
-        """Percentiles of one plane — the layer is lazy, so napari cannot guess these."""
+        The same numbers the layer-controls button produces — `reset_contrast_limits()`
+        ends in `calc_data_range`, which for a 2D array is an exact min/max — but taken
+        from the plane this reader already holds rather than from `layer._slice.image.raw`.
+        napari's version reads whatever it has *finished rendering*, and the widget sets
+        the limits in the same turn as it moves the slider, so calling it there would
+        contrast the channel the operator just left.
+
+        An earlier version used the 1st and 99.9th percentiles of a strided sample. It
+        made weak channels brighter, and it was not what the button does.
+        """
         plane = self.plane(channel)
-        sample = plane[:: self.CONTRAST_STRIDE, :: self.CONTRAST_STRIDE]
-        lo, hi = (float(v) for v in np.percentile(sample, [low, high]))
-        if hi <= lo:
-            hi = lo + 1.0
+        lo, hi = float(plane.min()), float(plane.max())
+        if hi <= lo:  # a flat plane; napari widens it the same way
+            lo, hi = min(lo, 0.0), max(hi, 1.0)
         return lo, hi
 
 
@@ -178,6 +189,11 @@ class LazyGatedLabels:
     # --- data access ---
 
     def raw_plane(self, channel: int) -> np.ndarray:
+        """The stored plane for a channel.
+
+        Channel -1 is the plane before the first marker: the empty DAPI slot, which
+        the widget shows while the slider sits on the nuclei channel.
+        """
         return self.reader.read(channel + self.plane_offset)
 
     def max_label(self, channel: int) -> int:

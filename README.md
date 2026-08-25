@@ -2,15 +2,83 @@
 
 Desktop installable napari application with thresholding widget, where multiplexed data (for example whole slide imaging spatial proteomics data) can be manually gated.
 
-Pick a tile, pick a channel, drag an arcsinh threshold, watch the cells below it
-disappear, press **Run**. Each Run writes the threshold to a CSV immediately, so gating
-work is never only in memory. Ungated channels stay `NaN` to see which channels have already been thresholded.
+![The thresholding widget.](app/screenshot.png)
 
-It reads three folders, matched on filename stem — `<stem>.tif` (raw tile),
-`<stem>_quant.csv` (one column per marker), `<stem>_entire_mask.tif` (per-channel label
-masks) — and writes `manual_thresholds_*.csv`: rows are markers, columns are tiles, plus
-a `.meta.json` sidecar with the cofactor and provenance. Channel names and their order
-come from the quant CSV's columns.
+## Manual
+
+Set one intensity threshold per marker, per tile, by eye: pick a tile, pick a channel,
+drag the slider until only the cells you would call positive are left, press **Run**.
+After pressing run, the threshold is saved as csv.
+
+---
+
+### 1. Download output dataset from pipeline 1
+
+One zip per dataset, containing the output of pipeline 1. Unzip and keep the folder structure intact. Three of its folders are used here:
+
+| folder | contents |
+|---|---|
+| `tiles/` | the raw tiles, `<tile>.tif` |
+| `csv/` | the measurements, `<tile>_quant.csv` — one column per marker |
+| `multilayer/` | the cell masks, `<tile>_entire_mask.tif` |
+
+Save the thresholds csv in the same folder. The gated multilayer mask can also be saved, but it is not necessary as they are saved in pipeline 2. 
+
+### 2. Install and open
+
+Unzip the application and double-click.
+
+| | |
+|---|---|
+| **macOS** | Double-click and open. See Release info. |
+| **Windows** | Keep the unzipped folder together, double-click `Multiplex Thresholder.exe`, then **More info ▸ Run anyway**. |
+| **Linux** | Unpack and run `./"Multiplex Thresholder"/"Multiplex Thresholder"`. |
+
+### 3. Set the paths
+
+Fill in the **Paths** box at the top, using the `…` button or by typing and pressing
+Enter. 
+
+| field | point it at |
+|---|---|
+| Raw tiles | `tiles/` |
+| Quantification CSVs | `csv/` |
+| Multilayer masks | `multilayer/` |
+| Thresholds CSV | where your results go, e.g. `manual_thresholds_2026-08-19.csv` in the dataset folder. It does not have to exist yet; an existing file is **extended**. |
+| Gated mask output | optional, only for **Export gated mask** (§6). |
+
+The **Tile** dropdown then lists every tile that has all three files. If it stays empty,
+one of the first three paths is wrong.
+
+## 4. Gate a tile
+
+1. **Tile** ▸ choose a tile ▸ **Load**. The image and its mask appear.
+2. **Channel** ▸ choose a marker, or step with **◀ ▶**. The channel dropdown and the
+   image's channel slider stay in step, so you always see the marker you are gating.
+3. Drag the **threshold** slider. The plot below shows that channel's intensity
+   distribution (arcsinh normalised) with your threshold as a red dashed line, and the percentage of cells
+   above it. Type an exact value in the box beside the slider if you prefer.
+   The slider's range is this channel's own min–max in this tile.
+4. Press **Run — apply threshold**. Cells below the threshold disappear from the mask,
+   and the value is written to the CSV.
+
+The status line at the bottom always shows `n/20 channels gated for this tile` and warns
+how many are still unset. 
+
+## 5. What is saved
+
+- **`manual_thresholds_*.csv`** — rows are markers, columns are tiles. This is the file
+  to hand back; it is what the statistics step reads. Written on every Run, safely
+  (an interrupted write cannot corrupt it).
+- **`manual_thresholds_*.csv.meta.json`** — a small companion file recording the
+  cofactor, the source folders and which marker/tile pairs are still unset. 
+
+## 6. Optional: export a gated mask
+
+With **Gated mask output** set, **Export gated mask** writes
+`<tile>_gated_mask.tif` — the mask with only the cells that passed each channel's
+threshold. Nothing downstream needs it; it is for QC and for other tools. Ungated
+channels are written as empty planes, and the app warns before doing so.
 
 ## Install
 
@@ -20,7 +88,7 @@ unzip it, and double-click.
 
 | | |
 |---|---|
-| **macOS** | `…-macos-arm64.zip` for Apple Silicon, `…-macos-x86_64.zip` for Intel. Move `Multiplex Thresholder.app` to Applications, then **right-click ▸ Open** the first time — the app is not signed, so a plain double-click is refused. If there is no *Open* button, run `xattr -dr com.apple.quarantine "/Applications/Multiplex Thresholder.app"`. |
+| **macOS** | `…-macos-arm64.zip` for Apple Silicon, `…-macos-x86_64.zip` for Intel. Move `Multiplex Thresholder.app` to Applications, then **right-click ▸ Open** the first time. |
 | **Windows** | `…-windows-x64.zip`. Unzip the whole folder and keep it together, double-click `Multiplex Thresholder.exe`, then **More info ▸ Run anyway**. |
 | **Linux** | `…-linux-x64.tar.gz`. Unpack and run `./"Multiplex Thresholder"/"Multiplex Thresholder"`. Needs a desktop with OpenGL. |
 
@@ -34,7 +102,7 @@ uv venv .venv --python 3.13                                  # or python -m venv
 uv pip install --python .venv/bin/python -e ".[app,test]"     # or pip install -r requirements-dev.txt
 ```
 
-Run it, straight from the source tree:
+Run it from the source tree:
 
 ```bash
 .venv/bin/python -m napari_multiplex_thresholder      # the app: viewer + both docks
@@ -49,7 +117,7 @@ Tests:
 .venv/bin/python tests/test_widget_real_data.py   # 17 checks against real tiles; skips if absent
 ```
 
-Build the double-clickable app locally (~1.5 min):
+Build the double-clickable app locally:
 
 ```bash
 uv pip install --python .venv/bin/python -e ".[bundle]"
@@ -57,28 +125,9 @@ uv pip install --python .venv/bin/python -e ".[bundle]"
 open "dist/Multiplex Thresholder.app"                 # or dist/Multiplex Thresholder/ on Windows/Linux
 ```
 
-Python 3.11 is the floor (napari 0.8's own floor).
-
-## Build on GitHub
-
-One workflow, **Build desktop apps**, and nothing builds on a push to a branch. Open the
-repository's **Actions** tab, press **Run workflow**, choose the branch and either `all`
-platforms or a single one while iterating — about 10 minutes per platform. Download the
-results from the finished run under **Artifacts**.
-
-Each job runs `tests/test_core.py` on its own platform, freezes the app, then **launches
-what it just froze** and runs its `--self-test`, so a bundle that cannot start fails the
-job. That check has two tiers: the packaging checks (bundled TIFF decoders, npe2 discovery,
-matplotlib's Qt backend) always have to pass, while the napari-viewer check needs a live
-OpenGL context and reports a visible SKIP where there is none. macOS and Linux runners have
-one — real, and xvfb with mesa — so they add `--require-gui`, which makes a missing context
-a failure. The Windows runner has no GPU driver, and software GL there is best-effort, so
-the viewer check may report a skip; check a Windows release candidate on real hardware with
-`--smoke`.
-
 ## Release
 
-Rehearse first, then tag. Both use the same build.
+Rehearse first, then tag where Both use the same build.
 
 **1. Try it.** Actions ▸ **Build desktop apps** ▸ Run workflow on `main`, platforms
 `all`. When it finishes, download the archives from the run's **Artifacts** and open the
@@ -93,12 +142,3 @@ git push
 git tag v0.1.1
 git push origin v0.1.1
 ```
-
-The tag runs the same four builds and then a `release` job, which attaches all four
-platform archives **and** the wheel to a new GitHub Release, named after the tag, with
-download instructions and the commit log in the notes. Nothing to upload by hand.
-
-Guards, so a bad tag cannot become a release: the release job refuses to run if the tag
-disagrees with `version` in `pyproject.toml`, and it only runs at all if every platform
-built *and* passed its self-test. A tag containing `-` (`v0.2.0-rc1`) is marked as a
-pre-release.

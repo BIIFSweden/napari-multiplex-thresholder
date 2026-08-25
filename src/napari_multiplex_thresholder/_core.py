@@ -234,6 +234,47 @@ class PlaneSource:
             return np.asarray(zarr.open(tif.aszarr(), mode="r")[index])
 
 
+#: What the pipeline calls a tile's nuclei segmentation. It lands in `nuclei/` in a
+#: current run and in `segmentation_nuclei/` in older ones, both beside the combined
+#: masks, so it is found by name rather than by folder.
+NUCLEI_SUFFIX = "_nuclei_mask.tif"
+
+
+def find_nuclei_mask(masks_dir, stem: str) -> Path | None:
+    """The nuclei segmentation belonging to a tile's combined mask, if it is there.
+
+    The combined mask's first plane is empty by construction — the pipeline fills
+    `entire_mask[m + 1]` and never the DAPI slot — so there is nothing to draw beside
+    the DAPI channel. The nuclei mask DAPI was segmented into comes out of the same
+    run, one folder over. Returns None rather than raising: it is a reference view,
+    nothing is gated on it, and a dataset shipped without that folder must still work.
+    """
+    masks_dir = Path(masks_dir)
+    name = f"{stem}{NUCLEI_SUFFIX}"
+    if (masks_dir / name).is_file():
+        return masks_dir / name
+    parent = masks_dir.parent
+    if not parent.is_dir():
+        return None
+    for sibling in sorted(parent.iterdir()):
+        if not sibling.is_dir() or sibling.name.startswith("."):
+            continue
+        candidate = sibling / name
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def read_single_plane(path) -> np.ndarray:
+    """A one-plane mask file — `<stem>_nuclei_mask.tif` — as a 2D array."""
+    plane = tifffile.imread(str(path))
+    if plane.ndim != 2:
+        raise ValueError(
+            f"expected a single (H, W) plane, got {plane.shape} in {Path(path).name}"
+        )
+    return plane
+
+
 @dataclass(frozen=True)
 class MaskInfo:
     shape: tuple[int, ...]

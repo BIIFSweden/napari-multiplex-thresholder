@@ -33,9 +33,10 @@ coverage.xml
 .vscode/
 *.swp
 
-# Local working notes, kept out of the published tree; the README carries what a user
-# needs.
+# Local working notes, kept out of the published tree;
 CLAUDE.md
+SUMMARY.md
+MANUAL.md
 
 # macOS. AppleDouble sidecars also appear beside real files on exFAT volumes, which is
 # why the package skips `._*` when listing tiles.

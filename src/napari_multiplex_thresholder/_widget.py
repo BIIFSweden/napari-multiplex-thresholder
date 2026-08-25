@@ -75,6 +75,18 @@ STEP_BUTTON_SPACING = 6
 #: which for a threshold file that other code parses as floats is a real hazard.
 C_LOCALE = QLocale(QLocale.Language.C)
 
+#: The tile's first plane, and the empty first plane of the mask beside it. It is
+#: the channel the nuclei were segmented from, so it is worth looking at, but it has
+#: no quantification column and no threshold: the first *marker* is plane 1.
+REFERENCE_NAME = "DAPI"
+
+#: Dock 2 opens as a sliver otherwise. Qt splits a dock area by the docks' size
+#: hints and dock 1's is tall, so the plot came up a few pixels high with its two
+#: y-tick labels drawn on top of each other. `KDE_MIN_HEIGHT` is what it can never
+#: be squeezed below, `KDE_DOCK_SHARE` the fraction of the window it opens at.
+KDE_MIN_HEIGHT = 180
+KDE_DOCK_SHARE = 0.32
+
 KDE_DOCK_NAME = "Multiplex thresholder — KDE"
 
 SETTINGS_ORG = "SciLifeLab-BIIF"
@@ -172,6 +184,13 @@ class KdePlot(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(2, 2, 2, 2)
         layout.addWidget(self.canvas)
+
+        # Expanding on *this* widget, not just the canvas: napari appends a vertical
+        # stretch to any dock content that does not ask for vertical space
+        # (`QtViewerDockWidget._maybe_add_vertical_stretch`, which exempts Expanding),
+        # and that stretch is what flattened the plot against the top of the dock.
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setMinimumHeight(KDE_MIN_HEIGHT)
 
         self._cache: dict[tuple[str, str, float], tuple[np.ndarray, np.ndarray]] = {}
         self.clear("Load a tile to see its distribution")
@@ -293,6 +312,7 @@ class GatingControls(QWidget):
         self.quant: _core.Quantification | None = None
         self.mask_info: _core.MaskInfo | None = None
         self.labels: _lazy.LazyGatedLabels | None = None
+        self.nuclei: Path | None = None  # the DAPI plane's mask, if the run kept it
         self.image: _lazy.LazyImage | None = None
         self.table: _core.ThresholdTable | None = None
         self.image_layer = None
@@ -321,8 +341,25 @@ class GatingControls(QWidget):
         if window is None or self.kde is None:
             return
         try:
-            window.add_dock_widget(self.kde, area="right", name=KDE_DOCK_NAME)
+            dock = window.add_dock_widget(self.kde, area="right", name=KDE_DOCK_NAME)
         except Exception:  # noqa: BLE001 — the controls are still usable without it
+            return
+        self._size_kde_dock(dock)
+
+    def _size_kde_dock(self, dock) -> None:
+        """Open dock 2 at a readable height instead of at its size hint.
+
+        Splitting a dock area is the main window's business — a widget cannot ask for
+        a share of it — so this is `resizeDocks` or nothing. The minimum height on the
+        KdePlot then keeps the splitter from being dragged back to a sliver.
+        """
+        main = dock.parent() if dock is not None else None
+        if main is None or not hasattr(main, "resizeDocks"):
+            return
+        height = max(KDE_MIN_HEIGHT, int(main.height() * KDE_DOCK_SHARE))
+        try:
+            main.resizeDocks([dock], [height], Qt.Orientation.Vertical)
+        except Exception:  # noqa: BLE001 — a first-open nicety, never fatal
             pass
 
     # ------------------------------------------------------------------ layout
@@ -437,6 +474,9 @@ class GatingControls(QWidget):
         thr_layout.addWidget(self.range_label)
         self.cofactor_warning = QLabel("")
         self.cofactor_warning.setWordWrap(True)
+        # Hidden while empty: a QLabel with no text still claims a line, which left a
+        # gap between the range and the Run button for a warning that is normally off.
+        self.cofactor_warning.setVisible(False)
         thr_layout.addWidget(self.cofactor_warning)
 
         self.run_button = QPushButton("Run — apply threshold")
@@ -514,12 +554,13 @@ class GatingControls(QWidget):
         self.tiles, problems = _core.discover_tiles(tiles_dir, quant_dir, mask_dir)
         self.tile_combo.clear()
         self.tile_combo.addItems([t.stem for t in self.tiles])
-        message = f"{len(self.tiles)} tile(s) ready."
-        if problems:
-            message += f" Skipped {len(problems)}: " + "; ".join(problems[:3])
-            if len(problems) > 3:
-                message += f" (+{len(problems) - 3} more)"
-        self.tile_status.setText(message)
+        count = len(self.tiles)
+        self.tile_status.setText(f"{count} tile{'' if count == 1 else 's'} ready")
+        # Which tiles were skipped and why is a paragraph on a bad folder, so it lives
+        # in the tooltip rather than in the panel.
+        self.tile_status.setToolTip(
+            "\n".join(problems) if problems else ""
+        )
 
     def load_tile(self) -> None:
         """Open the selected tile: quantification, mask geometry, lazy layers."""
@@ -541,21 +582,27 @@ class GatingControls(QWidget):
             quant = _core.load_quantification(tile.quant, tile.stem)
             info = _core.inspect_mask(tile.mask, len(quant.channels))
             labels = _lazy.LazyGatedLabels(tile.mask, len(quant.channels), info.plane_offset)
-            image = _lazy.LazyImage(tile.tile, drop_first=info.plane_offset == 1)
+            # The whole tile, DAPI included, so the channel slider runs over the
+            # file's own plane order: plane 0 is the nuclei channel, plane 1 the
+            # first marker.
+            image = _lazy.LazyImage(tile.tile, drop_first=False)
         except Exception as exc:  # noqa: BLE001 — surface anything to the operator
             QMessageBox.critical(self, "Could not load tile", f"{type(exc).__name__}: {exc}")
             return
 
-        if image.n_channels != len(quant.channels):
+        expected_planes = len(quant.channels) + info.plane_offset
+        if image.n_channels != expected_planes:
             QMessageBox.warning(
                 self, "Channel count mismatch",
-                f"The tile has {image.n_channels} channels after dropping DAPI but the "
-                f"quantification has {len(quant.channels)}. Continuing with the "
-                f"quantification's channels.",
+                f"The tile has {image.n_channels} planes but the quantification has "
+                f"{len(quant.channels)} channels, so {expected_planes} were expected "
+                f"(DAPI plus one per marker). Continuing with the quantification's "
+                f"channels.",
             )
 
         self.tile, self.quant, self.mask_info = tile, quant, info
         self.labels, self.image = labels, image
+        self.nuclei = _core.find_nuclei_mask(self._path("masks"), tile.stem)
         self._transformed = {}
         self.table = _core.ThresholdTable.load(
             self._path("thresholds"), quant.channels, [t.stem for t in self.tiles]
@@ -565,7 +612,12 @@ class GatingControls(QWidget):
 
         self._syncing = True
         self.channel_combo.clear()
-        self.channel_combo.addItems(quant.channels)
+        # One entry per plane of the file, DAPI first, so the dropdown index, the
+        # mask plane and napari's channel slider are the same number everywhere and
+        # the first marker is 1.
+        self.channel_combo.addItems(
+            [REFERENCE_NAME] * info.plane_offset + list(quant.channels)
+        )
         self._syncing = False
 
         self._set_enabled(True)
@@ -573,7 +625,7 @@ class GatingControls(QWidget):
             f"{tile.stem}: {quant.n_cells:,} cells, {len(quant.channels)} channels, "
             f"mask {info.shape} {info.dtype} (plane {info.plane_offset} = first marker)"
         )
-        self._select_channel(0)
+        self._select_channel(info.plane_offset)  # the first marker, not DAPI
 
     def _add_layers(self) -> None:
         """Replace this widget's layers with the loaded tile's.
@@ -629,12 +681,22 @@ class GatingControls(QWidget):
     # --------------------------------------------------------------- channels
 
     @property
-    def channel_index(self) -> int:
+    def plane_index(self) -> int:
+        """The plane on screen: dropdown row, mask plane and slider step alike."""
         return max(0, self.channel_combo.currentIndex())
 
     @property
+    def channel_index(self) -> int:
+        """Index into the quantification's channels; -1 on the DAPI plane."""
+        offset = self.mask_info.plane_offset if self.mask_info is not None else 0
+        return self.plane_index - offset
+
+    @property
     def channel(self) -> str | None:
-        return self.channel_combo.currentText() or None
+        """The marker being gated, or None while DAPI is on screen."""
+        if self.quant is None or not 0 <= self.channel_index < len(self.quant.channels):
+            return None
+        return self.quant.channels[self.channel_index]
 
     def transformed(self, channel: str) -> np.ndarray:
         """arcsinh-transformed intensities for one channel, cached per cofactor."""
@@ -646,10 +708,14 @@ class GatingControls(QWidget):
         return self._transformed[key]
 
     def step_channel(self, delta: int) -> None:
-        """Back / Next. Moves the dropdown, which moves napari's slider."""
+        """Back / Next. Moves the dropdown, which moves napari's slider.
+
+        In plane numbers, not marker numbers, so stepping back from the first marker
+        lands on DAPI rather than stopping one plane short of it.
+        """
         if self.quant is None:
             return
-        target = self.channel_index + delta
+        target = self.plane_index + delta
         if 0 <= target < self.channel_combo.count():
             self._select_channel(target)
 
@@ -686,10 +752,14 @@ class GatingControls(QWidget):
         self._refresh_for_channel()
 
     def _refresh_for_channel(self) -> None:
-        """Slider range, stored value, contrast limits and KDE for the current channel."""
-        channel = self.channel
-        if channel is None or self.quant is None or self._loading:
+        """Slider range, stored value, contrast limits and KDE for the current plane."""
+        if self.quant is None or self._loading:
             return
+        channel = self.channel
+        if channel is None:
+            self._show_reference_plane()
+            return
+        self._set_gating_enabled(True)
         values = self.transformed(channel)
         true_lo, true_hi = _core.channel_range(values)
         lo, hi = widen_to_decimals(true_lo, true_hi, self.value_box.decimals())
@@ -709,16 +779,45 @@ class GatingControls(QWidget):
         # refilled for the newly selected channel.
         self._redraw_labels()
 
-        if self.image_layer is not None:
-            try:
-                self.image_layer.contrast_limits = self.image.contrast_limits(
-                    self.channel_index
-                )
-            except Exception:  # noqa: BLE001 — a display nicety, never fatal
-                pass
-
+        self._update_contrast()
         self._update_kde()
         self._update_status()
+
+    def _show_reference_plane(self) -> None:
+        """DAPI: on screen like any other plane, with the gating controls off.
+
+        It has no quantification column, so there is no distribution to draw and
+        nothing to write into the CSV — the threshold table stays exactly the
+        markers the downstream analysis expects.
+        """
+        self._set_gating_enabled(False)
+        self._redraw_labels()
+        self._update_contrast()
+        self.range_label.setText(
+            f"{REFERENCE_NAME} — nuclei mask, not quantified"
+            if self.nuclei is not None else
+            f"{REFERENCE_NAME} — not quantified (no {_core.NUCLEI_SUFFIX} beside the masks)"
+        )
+        if self.kde is not None:
+            self.kde.clear(f"{REFERENCE_NAME} — not quantified, nothing to gate")
+        self._update_status()
+
+    def _set_gating_enabled(self, on: bool) -> None:
+        for widget in (self.slider, self.value_box, self.run_button, self.clear_button):
+            widget.setEnabled(on)
+
+    def _update_contrast(self) -> None:
+        """Auto-contrast once, on every channel change, the way napari's button does it.
+
+        A lazy layer gives napari nothing to guess from, so this is the only thing that
+        keeps a new channel readable without a trip to the layer controls.
+        """
+        if self.image_layer is None or self.image is None:
+            return
+        try:
+            self.image_layer.contrast_limits = self.image.contrast_limits(self.plane_index)
+        except Exception:  # noqa: BLE001 — a display nicety, never fatal
+            pass
 
     def _redraw_labels(self) -> None:
         """Show the current channel's plane, gated by whatever LUT it has.
@@ -726,14 +825,41 @@ class GatingControls(QWidget):
         Writes into the buffer napari already aliases, so this is what makes a Run
         visible. Called after every LUT change *and* on every channel change — the
         mask layer is 2D, so unlike the image stack napari will not re-slice it.
+
+        On the DAPI plane (`channel_index` -1) the combined mask has nothing to give —
+        its first plane is the empty DAPI slot — so the nuclei segmentation is drawn
+        there instead.
         """
         if self.labels_layer is None or self.labels is None or self._display is None:
             return
         try:
-            self.labels.write_plane_into(self.channel_index, self._display)
+            if self.channel_index < 0:
+                self._write_nuclei_into(self._display)
+            else:
+                self.labels.write_plane_into(self.channel_index, self._display)
         except ValueError:
             return  # buffer belongs to another tile; a Load is in flight
         self.labels_layer.refresh()
+
+    def _write_nuclei_into(self, out: np.ndarray) -> None:
+        """Draw the nuclei mask into the display buffer, or clear it.
+
+        Not cached: this plane is a reference view visited now and then, and a second
+        held mask plane would be another 0.45 GB on the largest tile for something
+        nobody gates. Re-reading it costs what any other channel step costs.
+        """
+        if self.nuclei is None:
+            out[:] = 0
+            return
+        try:
+            plane = _core.read_single_plane(self.nuclei)
+        except Exception:  # noqa: BLE001 — a reference view, never fatal
+            out[:] = 0
+            return
+        if plane.shape != out.shape:
+            out[:] = 0
+            return
+        np.copyto(out, plane, casting="unsafe")
 
     # -------------------------------------------------------------- threshold
 
@@ -764,12 +890,13 @@ class GatingControls(QWidget):
         self._update_kde()
 
     def _on_cofactor(self, value: float) -> None:
-        self.cofactor_warning.setText(
-            "" if value == 1 else
+        warning = "" if value == 1 else (
             "⚠ the downstream analysis assumes cofactor 1; thresholds saved with another "
             "cofactor are not comparable with previously saved manual_thresholds_*.csv. "
             "The value is recorded in the .meta.json sidecar."
         )
+        self.cofactor_warning.setText(warning)
+        self.cofactor_warning.setVisible(bool(warning))
         if self.quant is not None:
             self._transformed = {}
             self._refresh_for_channel()
@@ -788,14 +915,9 @@ class GatingControls(QWidget):
         self._redraw_labels()
 
         self.table.set(self.tile.stem, channel, threshold)
-        saved = self.save_thresholds()
+        self.save_thresholds()  # a failure to write raises a dialog of its own
         self._update_kde()
-        kept = int(lut.sum())
-        written = f" · saved to {Path(saved).name}" if saved else " · NOT SAVED"
-        self._update_status(
-            f"{channel}: threshold {threshold:.4f} → {kept:,} cells kept "
-            f"({_core.positive_fraction(values, threshold):.2f}% of measured){written}"
-        )
+        self._update_status()
 
     def clear_threshold(self) -> None:
         """Un-gate this channel: all cells visible again, value back to NaN."""
@@ -805,8 +927,7 @@ class GatingControls(QWidget):
         self._redraw_labels()
         self.table.clear(self.tile.stem, self.channel)
         self.save_thresholds()
-        self._refresh_for_channel()
-        self._update_status(f"{self.channel}: un-gated (NaN)")
+        self._refresh_for_channel()  # ends in _update_status()
 
     # ------------------------------------------------------------------ output
 
@@ -899,24 +1020,18 @@ class GatingControls(QWidget):
             gated=self.labels.lut(self.channel_index) is not None,
         )
 
-    def _update_status(self, message: str = "") -> None:
+    def _update_status(self) -> None:
+        """One line: how many of this tile's channels are gated.
+
+        Deliberately just the count. It used to carry a standing NaN warning and a
+        per-Run report as well, which made the panel jump by two lines on every
+        click; what is still unset is in the KDE title and in the sidecar.
+        """
         if self.table is None or self.tile is None:
-            self.status.setText(message)
+            self.status.setText("")
             return
         done, total = self.table.gated_count(self.tile.stem)
-        nan_note = ""
-        if self.channel is not None:
-            missing = self.quant.nan_count(self.channel)
-            if missing:
-                nan_note = f" · {missing:,} cells unmeasured in this compartment"
-        prefix = f"{done}/{total} channels gated for this tile{nan_note}"
-        if done < total:
-            # The standing version of the warning the Save button used to pop up.
-            prefix += (
-                f"\n⚠ {total - done} channel(s) still NaN — the downstream analysis will "
-                f"call every cell NEGATIVE for those"
-            )
-        self.status.setText(f"{prefix}\n{message}" if message else prefix)
+        self.status.setText(f"{done}/{total} channels gated for this tile")
 
 
 def make_gating_widget(napari_viewer):

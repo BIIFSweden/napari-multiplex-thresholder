@@ -213,6 +213,36 @@ def test_plane_reader_reads_one_plane_at_a_time():
         assert stack.shape == (len(CHANNELS), *reader.plane_shape)
 
 
+def test_nuclei_mask_is_found_beside_the_masks():
+    """The DAPI plane's mask lives one folder over, and the folder has two names."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        _, _, masks = _fixture(root)
+        stem = "T_tile0"
+        assert _core.find_nuclei_mask(masks, stem) is None  # nothing written yet
+
+        # current pipeline layout: nuclei/ beside multilayer/
+        nuclei = root / "nuclei"
+        nuclei.mkdir()
+        written = nuclei / f"{stem}{_core.NUCLEI_SUFFIX}"
+        tifffile.imwrite(written, np.zeros((64, 80), dtype=np.int64), compression="zlib")
+        assert _core.find_nuclei_mask(masks, stem) == written
+        assert _core.read_single_plane(written).shape == (64, 80)
+
+        # older runs call it segmentation_nuclei/, and the file must still be found
+        renamed = root / "segmentation_nuclei"
+        nuclei.rename(renamed)
+        assert _core.find_nuclei_mask(masks, stem) == renamed / f"{stem}{_core.NUCLEI_SUFFIX}"
+
+        # the masks folder itself wins over a sibling, and the match is per stem: a
+        # tile with no nuclei mask of its own must not be handed another tile's
+        beside = masks / f"{stem}{_core.NUCLEI_SUFFIX}"
+        tifffile.imwrite(beside, np.zeros((64, 80), dtype=np.int64), compression="zlib")
+        assert _core.find_nuclei_mask(masks, stem) == beside
+        assert _core.find_nuclei_mask(masks, "T_tile1") is None
+        assert _core.find_nuclei_mask(masks, "not_a_tile") is None
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):
