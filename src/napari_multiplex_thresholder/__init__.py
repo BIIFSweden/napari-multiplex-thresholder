@@ -24,7 +24,7 @@ from ._core import (
 if TYPE_CHECKING:  # pragma: no cover
     from ._widget import GatingControls, KdePlot, make_gating_widget
 
-__version__ = "0.1.0"
+__version__ = "1.0.1"
 
 #: Names served from `._widget`, which needs Qt.
 _QT_EXPORTS = {"GatingControls", "KdePlot", "make_gating_widget"}
