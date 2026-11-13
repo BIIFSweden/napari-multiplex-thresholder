@@ -22,6 +22,9 @@ One zip per dataset, containing the output of pipeline 1. Unzip and keep the fol
 | `csv/` | the measurements, `<tile>_quant.csv` — one column per marker |
 | `multilayer/` | the cell masks, `<tile>_entire_mask.tif` |
 
+Files are matched to a tile by the tile's filename without `.tif`, plus the suffix in
+the table. Other naming is fine — see **Path suffix** in §3.
+
 Save the thresholds csv in the same folder. The gated multilayer mask can also be saved, but it is not necessary as they are saved in pipeline 2. 
 
 ### 2. Install and open
@@ -47,18 +50,38 @@ Enter.
 | Thresholds CSV | where your results go, e.g. `manual_thresholds_2026-08-19.csv` in the dataset folder. It does not have to exist yet; an existing file is **extended**. |
 | Gated mask output | optional, only for **Export gated mask** (§6). |
 
+**Path suffix** (button at the bottom of the Paths box) changes what the measurements
+and masks are called after the tile's name — `_quant.csv` and `_entire_mask.tif` by
+default. Set it to `_intensity.csv` and `_cyto3_labels.tiff`, say, and the same folders
+are read under those names. It is remembered between sessions; a field left empty goes
+back to the default.
+
+The mask can be either shape:
+
+- **one plane per marker** (`<tile>_entire_mask.tif` from pipeline 1) — the plane order
+  is the column order of the measurements CSV, with the first plane left empty for DAPI;
+- **one label image for the whole tile** (a plain 2D Cellpose mask, say) — every marker
+  is then gated against the same cells.
+
+The raw tile is expected to start with DAPI: plane 0 is shown but cannot be gated, and
+the markers follow in the order of the CSV's columns.
+
 The **Tile** dropdown then lists every tile that has all three files. If it stays empty,
 one of the first three paths is wrong.
 
 ## 4. Gate a tile
 
-1. **Tile** ▸ choose a tile ▸ **Load**. The image and its mask appear.
+1. **Tile** ▸ choose a tile ▸ **Load**. The image and its mask appear. Thresholds the
+   CSV already holds for this tile are applied straight away, so a tile gated in an
+   earlier session opens gated.
 2. **Channel** ▸ choose a marker, or step with **◀ ▶**. The channel dropdown and the
    image's channel slider stay in step, so you always see the marker you are gating.
 3. Drag the **threshold** slider. The plot below shows that channel's intensity
    distribution (arcsinh normalised) with your threshold as a red dashed line, and the percentage of cells
    above it. Type an exact value in the box beside the slider if you prefer.
    The slider's range is this channel's own min–max in this tile.
+   Tick **no arcsinh** (under the cofactor) to work in raw mean intensity instead; the
+   saved value is then raw, and the `.meta.json` sidecar lists which thresholds are.
 4. Press **Run — apply threshold**. Cells below the threshold disappear from the mask,
    and the value is written to the CSV.
 
@@ -113,8 +136,8 @@ Run it from the source tree:
 Tests:
 
 ```bash
-.venv/bin/python tests/test_core.py               # 8 checks, synthetic data, no display
-.venv/bin/python tests/test_widget_real_data.py   # 17 checks against real tiles; skips if absent
+.venv/bin/python tests/test_core.py               # 12 checks, synthetic data, no display
+.venv/bin/python tests/test_widget_real_data.py   # 21 checks against real tiles; skips if absent
 ```
 
 Build the double-clickable app locally:

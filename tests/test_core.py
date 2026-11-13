@@ -64,6 +64,30 @@ def test_discovery_matches_on_stem():
         assert any("T_tile9" in p for p in problems)
 
 
+def test_discovery_honours_custom_suffixes():
+    """A dataset named by another convention opens by changing the two suffixes."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tiles, quant, masks = _fixture(Path(tmp))
+        for stem in ("T_tile0", "T_tile1"):
+            (quant / f"{stem}{_core.QUANT_SUFFIX}").rename(quant / f"{stem}.measure.csv")
+            (masks / f"{stem}{_core.MASK_SUFFIX}").rename(masks / f"{stem}-cells.tiff")
+
+        found, problems = _core.discover_tiles(tiles, quant, masks)
+        assert found == [] and len(problems) == 2  # the defaults no longer match
+
+        found, problems = _core.discover_tiles(
+            tiles, quant, masks, quant_suffix=".measure.csv", mask_suffix="-cells.tiff"
+        )
+        assert [t.stem for t in found] == ["T_tile0", "T_tile1"]
+        assert problems == []
+        assert found[0].quant.name == "T_tile0.measure.csv"
+        assert found[0].mask.name == "T_tile0-cells.tiff"
+
+        # empty means "the default", never a bare stem: the widget's dialog treats a
+        # cleared field the same way
+        assert _core.discover_tiles(tiles, quant, masks, quant_suffix="")[0] == []
+
+
 def test_quantification_and_transform():
     with tempfile.TemporaryDirectory() as tmp:
         _, quant, _ = _fixture(Path(tmp))
@@ -110,6 +134,72 @@ def test_mask_layout_detection():
             assert "planes" in str(exc)
         else:
             raise AssertionError("a mismatched channel count must raise")
+
+
+def test_flat_mask_is_one_shared_plane():
+    """A plain 2D label image — Cellpose writes one — backs every marker.
+
+    It has no channel axis at all, so the plane count cannot say where the first
+    marker is and there is nothing to line up against the quantification: every
+    channel reads plane 0 and the LUTs are what tell them apart.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        plane = np.zeros((32, 40), dtype=np.uint32)
+        plane[:10, :] = np.arange(1, 11, dtype=np.uint32)[:, None]
+        flat = root / "cells_cyto3_labels.tif"
+        tifffile.imwrite(flat, plane, compression="zlib")
+
+        source = _core.PlaneSource(flat)
+        assert source.shape == (1, 32, 40) and source.n_planes == 1
+        assert np.array_equal(source.read(0), plane)
+        try:
+            source.read(1)
+        except IndexError:
+            pass
+        else:
+            raise AssertionError("a one-plane source has no plane 1")
+
+        for n_channels in (1, 3):
+            info = _core.inspect_mask(flat, n_channels)
+            assert info.shared and info.n_planes == 1 and info.plane_offset == 0
+            assert all(_core.plane_for_channel(c, info) == 0 for c in range(n_channels))
+
+
+def test_shared_mask_gates_each_marker_on_its_own():
+    """Same objects, one LUT per marker, and one exported plane per marker."""
+    from napari_multiplex_thresholder import _lazy
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        plane = np.zeros((32, 40), dtype=np.uint32)
+        for lab in range(1, 11):
+            plane[lab - 1, :] = lab
+        flat = root / "cells_cyto3_labels.tif"
+        tifffile.imwrite(flat, plane, compression="zlib")
+
+        labels = _lazy.LazyGatedLabels(flat, n_channels=2, plane_offset=0, shared=True)
+        assert labels.plane_of(0) == 0 and labels.plane_of(1) == 0
+
+        keep_low = np.zeros(11, dtype=bool); keep_low[1:4] = True    # labels 1-3
+        keep_high = np.zeros(11, dtype=bool); keep_high[8:11] = True  # labels 8-10
+        labels.set_lut(0, keep_low)
+        labels.set_lut(1, keep_high)
+        assert set(np.unique(labels.plane(0))) - {0} == {1, 2, 3}
+        assert set(np.unique(labels.plane(1))) - {0} == {8, 9, 10}
+
+        # export: one plane per plane of the *tile* — the empty DAPI slot, then one
+        # gating of the shared image per marker, all reading source plane 0
+        out, empty = _core.export_gated_mask(
+            flat, root / "out" / "gated.tif",
+            luts={1: keep_low, 2: keep_high}, n_planes=3,
+            source_planes={1: 0, 2: 0},
+        )
+        written = tifffile.imread(out)
+        assert written.shape == (3, 32, 40)
+        assert empty == [0] and written[0].max() == 0
+        assert set(np.unique(written[1])) - {0} == {1, 2, 3}
+        assert set(np.unique(written[2])) - {0} == {8, 9, 10}
 
 
 def test_threshold_table_nan_semantics_and_atomic_save():
@@ -241,6 +331,46 @@ def test_nuclei_mask_is_found_beside_the_masks():
         assert _core.find_nuclei_mask(masks, stem) == beside
         assert _core.find_nuclei_mask(masks, "T_tile1") is None
         assert _core.find_nuclei_mask(masks, "not_a_tile") is None
+
+
+def test_threshold_space_conversion_and_raw_sidecar():
+    # arcsinh is monotonic: the same cells pass whichever space the number is in
+    raw = 1234.5
+    as_arcsinh = _core.convert_threshold(raw, from_raw=True, to_raw=False)
+    assert np.isclose(as_arcsinh, np.arcsinh(raw))
+    assert np.isclose(_core.convert_threshold(as_arcsinh, from_raw=False, to_raw=True), raw)
+    with_cof = _core.convert_threshold(raw, from_raw=True, to_raw=False, cofactor=5.0)
+    assert np.isclose(with_cof, np.arcsinh(raw / 5.0))
+    assert np.isclose(
+        _core.convert_threshold(with_cof, from_raw=False, to_raw=True, cofactor=5.0), raw
+    )
+    values = np.array([10.0, 1234.5, 5000.0, np.nan])
+    assert np.array_equal(values >= raw, _core.transform(values) >= as_arcsinh, equal_nan=False)
+    # same space and NaN pass through untouched
+    assert _core.convert_threshold(raw, from_raw=True, to_raw=True) == raw
+    assert np.isnan(_core.convert_threshold(float("nan"), from_raw=True, to_raw=False))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "manual_thresholds_test.csv"
+        meta_path = _core.ThresholdTable.meta_path(path)
+        table = _core.ThresholdTable.load(path, CHANNELS, ["T_tile0", "T_tile1"])
+        # no sidecar yet -> nothing is raw
+        assert _core.read_raw_pairs(meta_path, table) == set()
+
+        table.set("T_tile0", "MarkerA", raw)          # raw
+        table.set("T_tile0", "MarkerB", 7.5)          # arcsinh
+        table.save(path, meta={"cofactor": 1.0, "raw_space": [["T_tile0", "MarkerA"],
+                                                              ["T_tile1", "MarkerC"]]})
+        # the CSV itself stays pure numbers for the downstream reader
+        back = pd.read_csv(path, index_col=0)
+        assert back.at["MarkerA", "T_tile0"] == raw and back.at["MarkerB", "T_tile0"] == 7.5
+        # the pair whose value is NaN is dropped; the gated raw one survives
+        assert _core.read_raw_pairs(meta_path, table) == {("T_tile0", "MarkerA")}
+        # without a table every listed pair comes back
+        assert _core.read_raw_pairs(meta_path) == {("T_tile0", "MarkerA"), ("T_tile1", "MarkerC")}
+        # a broken sidecar is tolerated
+        meta_path.write_text("{not json")
+        assert _core.read_raw_pairs(meta_path, table) == set()
 
 
 if __name__ == "__main__":

@@ -152,17 +152,28 @@ class LazyGatedLabels:
     exactly as they did in the earlier implementation. `set_lut(channel, None)` shows
     everything again. The on-disk plane is always the source, so gating is never
     cumulative and there is no second full copy of the masks to hold.
+
+    `shared=True` is a mask holding a single label image for the whole tile — a
+    Cellpose segmentation, say. Every channel then reads plane 0 and the LUTs are
+    what tell them apart, so a channel's gating is still its own.
     """
 
-    def __init__(self, mask_path, n_channels: int, plane_offset: int = 1):
+    def __init__(
+        self,
+        mask_path,
+        n_channels: int,
+        plane_offset: int = 1,
+        shared: bool = False,
+    ):
         self.reader = PlaneReader(
             mask_path, cache_planes=LABEL_CACHE_PLANES, cast=LABEL_DTYPE
         )
-        self.plane_offset = plane_offset
+        self.plane_offset = 0 if shared else plane_offset
+        self.shared = shared
         self.n_channels = n_channels
         self._luts: dict[int, np.ndarray] = {}
 
-        if self.reader.n_planes < n_channels + plane_offset:
+        if not shared and self.reader.n_planes < n_channels + plane_offset:
             raise ValueError(
                 f"{self.reader.path.name} has {self.reader.n_planes} planes, need "
                 f"{n_channels + plane_offset}"
@@ -182,9 +193,23 @@ class LazyGatedLabels:
     def gated_channels(self) -> list[int]:
         return sorted(self._luts)
 
+    def plane_of(self, channel: int) -> int:
+        """The mask plane a channel is read from. Always 0 for a shared mask."""
+        return 0 if self.shared else channel + self.plane_offset
+
+    def luts_by_channel(self) -> dict[int, np.ndarray]:
+        """The LUTs as set, keyed by channel."""
+        return dict(self._luts)
+
     def luts_by_plane(self) -> dict[int, np.ndarray]:
-        """LUTs keyed by *mask plane* index, for `_core.export_gated_mask`."""
-        return {c + self.plane_offset: lut for c, lut in self._luts.items()}
+        """LUTs keyed by *mask plane* index.
+
+        Only meaningful when planes and channels are one to one: a shared mask maps
+        every channel onto plane 0, so the last one written wins. Export goes through
+        `plane_of` and `luts_by_channel` instead, which keeps one output plane per
+        marker whatever the mask looks like.
+        """
+        return {self.plane_of(c): lut for c, lut in self._luts.items()}
 
     # --- data access ---
 
@@ -194,7 +219,7 @@ class LazyGatedLabels:
         Channel -1 is the plane before the first marker: the empty DAPI slot, which
         the widget shows while the slider sits on the nuclei channel.
         """
-        return self.reader.read(channel + self.plane_offset)
+        return self.reader.read(self.plane_of(channel))
 
     def max_label(self, channel: int) -> int:
         return int(self.raw_plane(channel).max())

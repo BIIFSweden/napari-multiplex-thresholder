@@ -52,21 +52,34 @@ class TileRef:
     mask: Path
 
 
-def discover_tiles(tiles_dir, quant_dir, mask_dir) -> tuple[list[TileRef], list[str]]:
+def discover_tiles(
+    tiles_dir,
+    quant_dir,
+    mask_dir,
+    quant_suffix: str = QUANT_SUFFIX,
+    mask_suffix: str = MASK_SUFFIX,
+) -> tuple[list[TileRef], list[str]]:
     """Tiles that have all three files, plus a human-readable list of what's missing.
 
     Matching is by stem, never by position in two directory listings: an earlier
     version paired them positionally, where one stray file silently shifts every
     mask against its image.
+
+    The two suffixes are what this study's step 4 writes. They are arguments because
+    a dataset produced by another naming convention is otherwise unopenable, and the
+    widget's Path suffix dialog is what sets them; the stem, and therefore the pairing,
+    is still the raw tile's filename.
     """
     tiles_dir, quant_dir, mask_dir = Path(tiles_dir), Path(quant_dir), Path(mask_dir)
+    quant_suffix = quant_suffix or QUANT_SUFFIX
+    mask_suffix = mask_suffix or MASK_SUFFIX
     found: list[TileRef] = []
     problems: list[str] = []
 
     for name in list_files(tiles_dir, ".tif"):
         stem = name[: -len(".tif")]
-        quant = quant_dir / f"{stem}{QUANT_SUFFIX}"
-        mask = mask_dir / f"{stem}{MASK_SUFFIX}"
+        quant = quant_dir / f"{stem}{quant_suffix}"
+        mask = mask_dir / f"{stem}{mask_suffix}"
         missing = [str(p.name) for p in (quant, mask) if not p.exists()]
         if missing:
             problems.append(f"{stem}: no {', '.join(missing)}")
@@ -132,6 +145,46 @@ def transform(values: np.ndarray, cofactor: float = NOTEBOOK_COFACTOR) -> np.nda
     return np.arcsinh(values / cofactor)
 
 
+def convert_threshold(
+    value: float, *, from_raw: bool, to_raw: bool, cofactor: float = NOTEBOOK_COFACTOR
+) -> float:
+    """Move a stored threshold between raw mean intensity and `arcsinh(x / cofactor)`.
+
+    Both directions are monotonic, so the cells a threshold selects are the same
+    before and after; only the number changes. NaN (ungated) passes through, and a
+    value already in the requested space is returned as is.
+    """
+    if not np.isfinite(value) or from_raw == to_raw:
+        return float(value)
+    if cofactor <= 0:
+        raise ValueError(f"cofactor must be > 0, got {cofactor}")
+    if to_raw:  # stored as arcsinh, wanted raw
+        return float(np.sinh(value) * cofactor)
+    return float(np.arcsinh(value / cofactor))  # stored raw, wanted arcsinh
+
+
+def read_raw_pairs(meta_path, table: "ThresholdTable | None" = None) -> set[tuple[str, str]]:
+    """(tile, channel) pairs the sidecar marks as raw mean intensity (no arcsinh).
+
+    Tolerant on purpose: no sidecar, unreadable JSON or no `raw_space` key all give
+    an empty set, since the CSV is the data and the sidecar only qualifies it. Pairs
+    whose threshold is NaN in `table` are dropped, so a cleared threshold does not
+    keep a stale raw flag.
+    """
+    path = Path(meta_path)
+    if not path.exists():
+        return set()
+    try:
+        with open(path) as f:
+            payload = json.load(f)
+        pairs = {(str(p[0]), str(p[1])) for p in payload.get("raw_space", []) if len(p) == 2}
+    except (OSError, ValueError, TypeError, KeyError):
+        return set()
+    if table is not None:
+        pairs = {p for p in pairs if np.isfinite(table.get(*p))}
+    return pairs
+
+
 def channel_range(transformed: np.ndarray) -> tuple[float, float]:
     """(min, max) of one channel, NaN-safe, for the slider bounds.
 
@@ -191,7 +244,14 @@ def positive_fraction(transformed: np.ndarray, threshold: float) -> float:
 class PlaneSource:
     """Reads single (H, W) planes out of a (C, H, W) TIFF, whatever its layout.
 
-    Two layouts turn up. The pipeline's masks and tiles have one page per channel,
+    A plain 2D image — a Cellpose label image, a single-channel tile — is read as a
+    stack of one plane rather than rejected: `shape` reports `(1, H, W)` and
+    `read(0)` returns it. Segmentation that is one label image for the whole tile is
+    a layout this project meets in the wild, and the alternative was asking for a
+    file to be rewritten with an axis that carries no information.
+
+    Two layouts turn up for real stacks. The pipeline's masks and tiles have one page
+    per channel,
     where `pages[i].asarray()` decodes just that channel — ~21 ms on the real
     zlib-compressed masks. But tifffile stores a small leading axis as *samples per
     pixel* instead (a 4-plane stack becomes one page with 4 samples), and then
@@ -207,10 +267,16 @@ class PlaneSource:
         self.path = Path(path)
         with tifffile.TiffFile(self.path) as tif:
             series = tif.series[0]
-            self.shape = tuple(series.shape)
+            shape = tuple(series.shape)
             self.dtype = np.dtype(series.dtype)
-            if len(self.shape) != 3:
-                raise ValueError(f"expected a (C, H, W) stack, got {self.shape} in {self.path.name}")
+            if len(shape) == 2:
+                shape = (1, *shape)  # one label image for the whole tile
+            elif len(shape) != 3:
+                raise ValueError(
+                    f"expected a (C, H, W) stack or a single (H, W) plane, got "
+                    f"{shape} in {self.path.name}"
+                )
+            self.shape = shape
             self.n_planes = int(self.shape[0])
             self._pages_are_planes = len(series.pages) == self.n_planes
 
@@ -277,10 +343,28 @@ def read_single_plane(path) -> np.ndarray:
 
 @dataclass(frozen=True)
 class MaskInfo:
+    """How the mask file is laid out, in the mask's own plane numbers.
+
+    `plane_offset` is where the first marker sits *in the mask* — 1 for this study's
+    combined masks, whose plane 0 is the empty DAPI slot. It is not where the first
+    marker sits on screen: that comes from the raw tile, which always leads with
+    DAPI, and the two are different numbers whenever the mask has no DAPI slot.
+
+    `shared` means the file holds one label image that backs every marker — a
+    Cellpose segmentation of the whole tile, gated per channel against the same
+    objects. Then there is no per-marker plane at all and every channel reads
+    plane 0.
+    """
+
     shape: tuple[int, ...]
     dtype: np.dtype
     n_planes: int
     plane_offset: int  # 1 when plane 0 is the empty DAPI slot
+    shared: bool = False  # one plane for every marker
+
+    def plane_for(self, channel_index: int) -> int:
+        """The mask plane a marker is read from."""
+        return 0 if self.shared else channel_index + self.plane_offset
 
 
 def inspect_mask(mask_path, n_channels: int) -> MaskInfo:
@@ -291,21 +375,26 @@ def inspect_mask(mask_path, n_channels: int) -> MaskInfo:
     if len(shape) != 3:
         raise ValueError(f"expected a (C, H, W) mask, got {shape} in {Path(mask_path).name}")
 
-    if n_planes == n_channels + 1:
-        offset = 1  # current layout: plane 0 empty, marker m at m + 1
+    if n_planes == 1:
+        # One label image for the whole tile: every marker is gated against the same
+        # objects. Also the reading of a 1-channel quantification beside a one-plane
+        # mask, where "shared" and "one plane per marker" are the same mapping.
+        offset, shared = 0, True
+    elif n_planes == n_channels + 1:
+        offset, shared = 1, False  # this study: plane 0 empty, marker m at m + 1
     elif n_planes == n_channels:
-        offset = 0  # already sliced, or the legacy layout with the empty plane last
+        offset, shared = 0, False  # already sliced, or the empty plane written last
     else:
         raise ValueError(
             f"{Path(mask_path).name} has {n_planes} planes but the quantification has "
-            f"{n_channels} channels; expected {n_channels + 1} (plane 0 = DAPI slot) "
-            f"or {n_channels}."
+            f"{n_channels} channels; expected {n_channels + 1} (plane 0 = DAPI slot), "
+            f"{n_channels}, or 1 (one label image shared by every marker)."
         )
-    return MaskInfo(tuple(shape), dtype, n_planes, offset)
+    return MaskInfo(tuple(shape), dtype, n_planes, offset, shared)
 
 
 def plane_for_channel(channel_index: int, info: MaskInfo) -> int:
-    return channel_index + info.plane_offset
+    return info.plane_for(channel_index)
 
 
 # -----------------------------------------------------------------------------
@@ -432,6 +521,7 @@ def export_gated_mask(
     compression: str = "zlib",
     dtype: np.dtype | None = None,
     progress=None,
+    source_planes: dict[int, int] | None = None,
 ) -> tuple[Path, list[int]]:
     """Write a (C, H, W) mask where each plane keeps only cells that passed.
 
@@ -443,6 +533,11 @@ def export_gated_mask(
     A plane with no LUT — an ungated channel, or the empty DAPI slot — is written
     as zeros, which is what the downstream analysis produces from a NaN threshold.
     The indices of those planes are returned so the caller can say so out loud.
+
+    `source_planes` maps an output plane to the source plane it is read from, and
+    defaults to reading plane i for plane i. It is what lets a mask with one shared
+    label image still export one plane per marker: several output planes then read
+    the same source plane and differ only in the LUT applied to it.
     """
     mask_path, out_path = Path(mask_path), Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -460,7 +555,7 @@ def export_gated_mask(
                 empty.append(index)
                 yield np.zeros(source.plane_shape, dtype=out_dtype)
                 continue
-            plane = source.read(index)
+            plane = source.read((source_planes or {}).get(index, index))
             keep = lut[np.clip(plane, 0, lut.size - 1)]
             yield np.where(keep, plane, 0).astype(out_dtype, copy=False)
 

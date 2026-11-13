@@ -120,10 +120,16 @@ def main() -> int:
         return 0
 
     import napari
+    from qtpy.QtCore import QSettings
     from qtpy.QtWidgets import QApplication
 
     from napari_multiplex_thresholder import _core
-    from napari_multiplex_thresholder._widget import GatingControls, KdePlot
+    from napari_multiplex_thresholder._widget import (
+        DEFAULT_SUFFIXES,
+        GatingControls,
+        KdePlot,
+        SuffixDialog,
+    )
 
     out_dir = Path(os.environ.get("TMPDIR", "/tmp")) / "napari_multiplex_thresholder_test"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -135,6 +141,14 @@ def main() -> int:
     viewer = napari.Viewer(show=False)
     kde = KdePlot(dark=True)
     widget = GatingControls(viewer, kde=kde)
+    # A throwaway settings domain, swapped in before anything sets a path: the widget
+    # saves every path edit, so a test run would otherwise replace whatever folders
+    # the operator has open in their own napari — twice observed, once with the
+    # thresholds CSV pointed at a temp file.
+    widget.settings = QSettings("napari-multiplex-thresholder", "widget-tests")
+    # This dataset carries the pipeline's own names. Whatever the Path suffix dialog
+    # last stored is a per-user setting and must not decide what the test matches.
+    widget.suffixes = dict(DEFAULT_SUFFIXES)
 
     widget.paths["tiles"].set_value(str(TILES))
     widget.paths["quant"].set_value(str(QUANT))
@@ -159,6 +173,24 @@ def main() -> int:
     print(f"ok   a path edit re-listed the tiles by itself: {len(stems)} found, "
           f"{stems[0]} …")
 
+    # --- Path suffix: the same folders, matched under another naming convention.
+    #     Set on the widget rather than through edit_suffixes(), which would write
+    #     the test's suffixes into the user's QSettings.
+    dialog = SuffixDialog(widget.suffixes)
+    dialog.edits["quant"].setText("_measurements.csv")
+    dialog.edits["masks"].setText("")  # blank means the default, never a bare stem
+    chosen = dialog.values()
+    assert chosen == {"quant": "_measurements.csv", "masks": _core.MASK_SUFFIX}
+    widget.suffixes = chosen
+    widget.refresh_tiles()
+    assert widget.tile_combo.count() == 0, "a suffix nothing matches should empty the list"
+    dialog.restore_defaults()
+    widget.suffixes = dialog.values()
+    widget.refresh_tiles()
+    assert [widget.tile_combo.itemText(i) for i in range(widget.tile_combo.count())] == stems
+    print(f"ok   Path suffix: '_measurements.csv' matched 0 tiles, the default "
+          f"'{_core.QUANT_SUFFIX}' matched {len(stems)} again")
+
     # smallest tile, so the test is quick but still real data
     target = os.environ.get("GATING_TEST_TILE", "")
     index = stems.index(target) if target in stems else 0
@@ -173,7 +205,11 @@ def main() -> int:
 
     # --- the raw tile is a lazy (C, H, W) stack: that is what gives the channel
     #     slider. The mask is one reused 2D buffer that napari aliases.
-    offset = widget.mask_info.plane_offset  # 1 when plane 0 is the DAPI slot
+    # The display offset comes from the tile, which leads with DAPI; the mask's own
+    # offset is a separate number and here they agree (plane 0 = the empty DAPI slot).
+    offset = widget.dapi_planes
+    assert offset == 1 and widget.mask_info.plane_offset == 1
+    assert not widget.mask_info.shared
     assert widget.image_layer.data.shape[0] == n_channels + offset, (
         "the raw stack must keep every plane of the file, DAPI included"
     )
@@ -323,12 +359,24 @@ def main() -> int:
     print(f"ok   sidecar {meta.name} records cofactor 1 (the space the downstream analysis works in)")
 
     # --- export streams a gated mask ---
+    # The same mapping the widget's Export button builds: one output plane per plane
+    # of the tile, each naming the mask plane it reads. Here that is the identity;
+    # with a shared label image every marker would name plane 0.
+    luts, source_planes = {}, {}
+    for channel in range(len(widget.quant.channels)):
+        out_plane = channel + widget.dapi_planes
+        source_planes[out_plane] = widget.labels.plane_of(channel)
+        lut = widget.labels.lut(channel)
+        if lut is not None:
+            luts[out_plane] = lut
+    assert source_planes == {p: p for p in source_planes}, "this mask is one plane per marker"
     out, empty = _core.export_gated_mask(
         widget.tile.mask,
         out_dir / f"{stem}_gated_mask.tif",
-        widget.labels.luts_by_plane(),
-        n_planes=widget.mask_info.n_planes,
+        luts,
+        n_planes=len(widget.quant.channels) + widget.dapi_planes,
         compression="zlib",
+        source_planes=source_planes,
     )
     import tifffile
 

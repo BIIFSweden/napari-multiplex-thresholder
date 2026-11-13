@@ -3,7 +3,8 @@
 Dock 1 (`GatingControls`), top to bottom:
 
     paths            tiles / quantification CSVs / combined masks / thresholds CSV
-                     (+ an optional folder for exported gated masks)
+                     (+ an optional folder for exported gated masks), and a
+                     Path suffix button for how the last two are named per tile
     tile             dropdown + Load (the list re-reads whenever a path changes)
     channel          dropdown + Back / Next, two-way bound to napari's channel slider
     threshold        arcsinh slider, exact value and cofactor on one line, Run below
@@ -28,7 +29,10 @@ from pathlib import Path
 import numpy as np
 from qtpy.QtCore import QLocale, QSettings, Qt, QTimer
 from qtpy.QtWidgets import (
+    QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -94,14 +98,27 @@ SETTINGS_APP = "napari-multiplex-thresholder"
 
 PATH_FIELDS = [
     ("tiles", "Raw tiles", "dir", "Folder with the per-tissue tiles (*.tif)."),
-    ("quant", "Quantification CSVs", "dir", "Folder with *_quant.csv, one per tile."),
-    ("masks", "Multilayer masks", "dir", "Folder with *_entire_mask.tif, one per tile."),
+    ("quant", "Quantification CSVs", "dir",
+     "Folder with one file per tile, named <tile stem>{suffix}."),
+    ("masks", "Multilayer masks", "dir",
+     "Folder with one file per tile, named <tile stem>{suffix}."),
     ("thresholds", "Thresholds CSV", "file",
      "Where thresholds are written. An existing file is loaded and extended, so "
      "gating can be resumed. Layout matches what the downstream analysis reads."),
     ("export", "Gated mask output", "dir",
      "Only needed for 'Export gated mask'. Left empty, export is disabled."),
 ]
+
+#: What each of those folders' files carry after the tile stem. The defaults are what
+#: this study's step 4 writes; the Paths group's "Path suffix" button edits them, and
+#: QSettings remembers them, so a dataset named by another convention can be opened
+#: without renaming it. The raw tile is not in the list: its filename *is* the stem.
+SUFFIX_FIELDS = [
+    ("quant", "Quantification CSVs", _core.QUANT_SUFFIX),
+    ("masks", "Multilayer masks", _core.MASK_SUFFIX),
+]
+
+DEFAULT_SUFFIXES = {key: default for key, _label, default in SUFFIX_FIELDS}
 
 
 def widen_to_decimals(lo: float, hi: float, decimals: int) -> tuple[float, float]:
@@ -157,6 +174,61 @@ class PathRow(QWidget):
     def set_value(self, text: str) -> None:
         self.line.setText(text or "")
         self.line.setCursorPosition(0)  # show the start of a long path, not its tail
+
+
+class SuffixDialog(QDialog):
+    """Edit the tail each matched file carries after the tile stem.
+
+    Two line edits and a Restore defaults button. A field left empty falls back to
+    its default rather than being taken literally: an empty quantification suffix
+    would have the widget look for a file named exactly like the tile's stem, which
+    is never what someone clearing the box meant.
+    """
+
+    def __init__(self, current: dict[str, str], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Path suffix")
+        self.edits: dict[str, QLineEdit] = {}
+
+        form = QFormLayout()
+        for key, label, default in SUFFIX_FIELDS:
+            edit = QLineEdit(current.get(key, default))
+            edit.setMinimumWidth(220)
+            edit.setToolTip(f"Matched as <tile stem>{default} by default.")
+            self.edits[key] = edit
+            form.addRow(f"{label}:", edit)
+
+        note = QLabel(
+            "Files are paired with a tile by its filename stem plus these suffixes.\n"
+            "The raw tile itself is matched on *.tif and has no suffix."
+        )
+        note.setWordWrap(True)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+            | QDialogButtonBox.StandardButton.RestoreDefaults
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        buttons.button(QDialogButtonBox.StandardButton.RestoreDefaults).clicked.connect(
+            self.restore_defaults
+        )
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(note)
+        layout.addWidget(buttons)
+
+    def restore_defaults(self) -> None:
+        for key, _label, default in SUFFIX_FIELDS:
+            self.edits[key].setText(default)
+
+    def values(self) -> dict[str, str]:
+        return {
+            key: (self.edits[key].text().strip() or default)
+            for key, _label, default in SUFFIX_FIELDS
+        }
 
 
 class KdePlot(QWidget):
@@ -255,8 +327,9 @@ class KdePlot(QWidget):
         threshold: float,
         cofactor: float,
         gated: bool,
+        raw: bool = False,
     ) -> None:
-        grid, density = self.curve((stem, channel, cofactor), transformed)
+        grid, density = self.curve((stem, channel, "raw" if raw else cofactor), transformed)
         self.ax.clear()
         self._style()
 
@@ -280,7 +353,10 @@ class KdePlot(QWidget):
             f"{channel} — {pct:.2f}% positive of {measured:,} measured  ({state})",
             fontsize=9,
         )
-        self.ax.set_xlabel(f"arcsinh(mean intensity{cof})", fontsize=8)
+        self.ax.set_xlabel(
+            "mean intensity (raw, no arcsinh)" if raw else f"arcsinh(mean intensity{cof})",
+            fontsize=8,
+        )
         self.ax.set_ylabel("density", fontsize=8)
         self.canvas.draw_idle()
 
@@ -303,6 +379,10 @@ class GatingControls(QWidget):
         super().__init__(parent)
         self.viewer = napari_viewer
         self.settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
+        #: (tile stem, channel) pairs whose stored threshold is raw mean intensity,
+        #: i.e. set with "no arcsinh" ticked. Loaded from the sidecar with the CSV,
+        #: written back into it on every save (§4 of CLAUDE.md).
+        self.raw_pairs: set[tuple[str, str]] = set()
         self._owns_kde = kde is None
         self.kde = kde if kde is not None else KdePlot(dark=self._viewer_is_dark())
 
@@ -311,6 +391,12 @@ class GatingControls(QWidget):
         self.tile: _core.TileRef | None = None
         self.quant: _core.Quantification | None = None
         self.mask_info: _core.MaskInfo | None = None
+        #: Leading planes of the *tile* that are not markers. DAPI is expected first,
+        #: so this is 1 whenever the tile carries it — and it is what the dropdown,
+        #: the canvas slider and `channel_index` are counted in. The mask's own
+        #: offset can differ (`MaskInfo.plane_offset`) or not exist at all (a shared
+        #: label image); mixing the two shifts every threshold by one marker.
+        self.dapi_planes = 1
         self.labels: _lazy.LazyGatedLabels | None = None
         self.nuclei: Path | None = None  # the DAPI plane's mask, if the run kept it
         self.image: _lazy.LazyImage | None = None
@@ -321,8 +407,10 @@ class GatingControls(QWidget):
         self._transformed: dict[str, np.ndarray] = {}
         self._syncing = False
         self._loading = False
+        self.suffixes: dict[str, str] = dict(DEFAULT_SUFFIXES)
 
         self._build()
+        self._restore_suffixes()  # before the paths: restoring them lists the tiles
         self._restore_paths()
         self.viewer.dims.events.current_step.connect(self._on_dims_changed)
 
@@ -371,17 +459,32 @@ class GatingControls(QWidget):
         box = QGroupBox("Paths")
         form = QFormLayout(box)
         self.paths: dict[str, PathRow] = {}
+        self.path_labels: dict[str, QLabel] = {}
         for key, label, mode, tip in PATH_FIELDS:
             row = PathRow(mode)
-            row.setToolTip(tip)
             # editingFinished, not textChanged: re-listing three directories on every
             # keystroke is wasteful, and on the external drive it is slow. This fires
             # on Enter or focus loss, and PathRow emits it after a Browse too.
             row.line.editingFinished.connect(self._on_path_changed)
             self.paths[key] = row
             tag = QLabel(label)
-            tag.setToolTip(tip)
+            self.path_labels[key] = tag
             form.addRow(tag, row)
+
+        # The suffixes are a rarely touched detail of the same three folders, so they
+        # sit in this group behind a button rather than as two more always-open rows.
+        self.suffix_button = QPushButton("Path suffix…")
+        self.suffix_button.clicked.connect(self.edit_suffixes)
+        # A one-widget row spanning both columns, not a field beside an empty label:
+        # a QFormLayout gives its field column the row's size hint, so a stretch in
+        # the field column has nothing to push against and the button lands mid-form.
+        suffix_holder = QWidget()
+        suffix_row = QHBoxLayout(suffix_holder)
+        suffix_row.setContentsMargins(0, 0, 0, 0)
+        suffix_row.addStretch(1)
+        suffix_row.addWidget(self.suffix_button)
+        form.addRow(suffix_holder)
+        self._apply_suffix_tooltips()
         outer.addWidget(box)
 
         # --- tile ---
@@ -428,7 +531,7 @@ class GatingControls(QWidget):
         outer.addWidget(channel_box)
 
         # --- threshold ---
-        thr_box = QGroupBox("arcsinh threshold")
+        thr_box = self.thr_box = QGroupBox("arcsinh threshold")
         thr_layout = QVBoxLayout(thr_box)
 
         # slider, exact value and cofactor all on one line
@@ -469,6 +572,23 @@ class GatingControls(QWidget):
         slider_row.addWidget(cofactor_tag)
         slider_row.addWidget(self.cofactor_box)
         thr_layout.addLayout(slider_row)
+
+        # "no arcsinh" sits under the cofactor box. Ticked, the slider, the value box,
+        # the plot and the value Run stores are all raw mean intensity, and the
+        # cofactor has nothing to do, so it is greyed out.
+        raw_row = QHBoxLayout()
+        self.no_arcsinh_box = QCheckBox("no arcsinh")
+        self.no_arcsinh_box.setToolTip(
+            "Work in raw mean intensity instead of arcsinh(x / cofactor): the slider, "
+            "the value box and the plot show the quantification as measured, and Run "
+            "stores the raw value in the CSV. The .meta.json sidecar lists which "
+            "(tile, marker) thresholds are raw; the downstream analysis compares "
+            "arcsinh values, so it has to be told about those."
+        )
+        self.no_arcsinh_box.toggled.connect(self._on_no_arcsinh)
+        raw_row.addStretch(1)
+        raw_row.addWidget(self.no_arcsinh_box)
+        thr_layout.addLayout(raw_row)
 
         self.range_label = QLabel("")
         thr_layout.addWidget(self.range_label)
@@ -523,6 +643,45 @@ class GatingControls(QWidget):
 
     # ------------------------------------------------------------- path memory
 
+    def _restore_suffixes(self) -> None:
+        for key, _label, default in SUFFIX_FIELDS:
+            stored = str(self.settings.value(f"suffixes/{key}", "") or "").strip()
+            self.suffixes[key] = stored or default
+        self._apply_suffix_tooltips()
+
+    def _save_suffixes(self) -> None:
+        for key, value in self.suffixes.items():
+            self.settings.setValue(f"suffixes/{key}", value)
+
+    def _apply_suffix_tooltips(self) -> None:
+        """Say the suffix in place, so the button's effect is visible without opening it."""
+        for key, _label, _mode, tip in PATH_FIELDS:
+            text = (
+                tip.format(suffix=self.suffixes[key]) if key in self.suffixes else tip
+            )
+            self.paths[key].setToolTip(text)
+            self.path_labels[key].setToolTip(text)
+        self.suffix_button.setToolTip(
+            "How the quantification and mask files are named after the tile stem.\n"
+            + "\n".join(
+                f"{label}: <tile stem>{self.suffixes[key]}"
+                for key, label, _default in SUFFIX_FIELDS
+            )
+        )
+
+    def edit_suffixes(self) -> None:
+        """The Path suffix dialog. Accepting re-lists the tiles under the new names."""
+        dialog = SuffixDialog(self.suffixes, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        chosen = dialog.values()
+        if chosen == self.suffixes:
+            return
+        self.suffixes = chosen
+        self._save_suffixes()
+        self._apply_suffix_tooltips()
+        self.refresh_tiles()
+
     def _restore_paths(self) -> None:
         for key, row in self.paths.items():
             row.set_value(str(self.settings.value(f"paths/{key}", "") or ""))
@@ -551,7 +710,10 @@ class GatingControls(QWidget):
             self.tile_status.setText("Set the tiles, quantification and mask folders first.")
             return
 
-        self.tiles, problems = _core.discover_tiles(tiles_dir, quant_dir, mask_dir)
+        self.tiles, problems = _core.discover_tiles(
+            tiles_dir, quant_dir, mask_dir,
+            quant_suffix=self.suffixes["quant"], mask_suffix=self.suffixes["masks"],
+        )
         self.tile_combo.clear()
         self.tile_combo.addItems([t.stem for t in self.tiles])
         count = len(self.tiles)
@@ -581,7 +743,9 @@ class GatingControls(QWidget):
         try:
             quant = _core.load_quantification(tile.quant, tile.stem)
             info = _core.inspect_mask(tile.mask, len(quant.channels))
-            labels = _lazy.LazyGatedLabels(tile.mask, len(quant.channels), info.plane_offset)
+            labels = _lazy.LazyGatedLabels(
+                tile.mask, len(quant.channels), info.plane_offset, shared=info.shared
+            )
             # The whole tile, DAPI included, so the channel slider runs over the
             # file's own plane order: plane 0 is the nuclei channel, plane 1 the
             # first marker.
@@ -590,23 +754,34 @@ class GatingControls(QWidget):
             QMessageBox.critical(self, "Could not load tile", f"{type(exc).__name__}: {exc}")
             return
 
-        expected_planes = len(quant.channels) + info.plane_offset
-        if image.n_channels != expected_planes:
+        # How many leading tile planes are not markers. DAPI is expected at plane 0,
+        # so a tile with one plane more than the quantification has markers has it;
+        # one with exactly as many planes does not. This is the *tile's* offset and
+        # is deliberately not the mask's: a Cellpose label image has no DAPI slot,
+        # while the tile it was segmented from still starts with DAPI.
+        extra = image.n_channels - len(quant.channels)
+        dapi_planes = 1 if extra >= 1 else 0
+        if extra not in (0, 1):
             QMessageBox.warning(
                 self, "Channel count mismatch",
                 f"The tile has {image.n_channels} planes but the quantification has "
-                f"{len(quant.channels)} channels, so {expected_planes} were expected "
-                f"(DAPI plus one per marker). Continuing with the quantification's "
-                f"channels.",
+                f"{len(quant.channels)} channels, so {len(quant.channels)} or "
+                f"{len(quant.channels) + 1} (DAPI first) were expected. Continuing "
+                f"with the quantification's channels and DAPI at plane 0.",
             )
 
         self.tile, self.quant, self.mask_info = tile, quant, info
+        self.dapi_planes = dapi_planes
         self.labels, self.image = labels, image
         self.nuclei = _core.find_nuclei_mask(self._path("masks"), tile.stem)
         self._transformed = {}
         self.table = _core.ThresholdTable.load(
             self._path("thresholds"), quant.channels, [t.stem for t in self.tiles]
         )
+        self.raw_pairs = _core.read_raw_pairs(
+            _core.ThresholdTable.meta_path(self._path("thresholds")), self.table
+        )
+        self._restore_gating()
 
         self._add_layers()
 
@@ -616,16 +791,50 @@ class GatingControls(QWidget):
         # mask plane and napari's channel slider are the same number everywhere and
         # the first marker is 1.
         self.channel_combo.addItems(
-            [REFERENCE_NAME] * info.plane_offset + list(quant.channels)
+            [REFERENCE_NAME] * self.dapi_planes + list(quant.channels)
         )
         self._syncing = False
 
         self._set_enabled(True)
+        layout = (
+            "one shared label image"
+            if info.shared
+            else f"plane {info.plane_offset} = first marker"
+        )
         self.tile_status.setText(
             f"{tile.stem}: {quant.n_cells:,} cells, {len(quant.channels)} channels, "
-            f"mask {info.shape} {info.dtype} (plane {info.plane_offset} = first marker)"
+            f"mask {info.shape} {info.dtype} ({layout})"
         )
-        self._select_channel(info.plane_offset)  # the first marker, not DAPI
+        self._select_channel(self.dapi_planes)  # the first marker, not DAPI
+
+    def _restore_gating(self) -> None:
+        """Gate every channel the thresholds CSV already holds a value for.
+
+        Called by Load, so a tile gated in an earlier session opens with its
+        thresholds applied: the mask, the KDE title, the status count and the export
+        all agree with the CSV without a Run per channel.
+
+        Each value is compared in the space it was stored in — raw mean intensity for
+        the pairs the sidecar lists, `arcsinh(x / cofactor)` otherwise — so no
+        conversion sits between the CSV and the cells it selects.
+
+        The LUT is sized from the quantification's labels, with one more entry left
+        False. A mask label the quantification has no row for is clipped onto that
+        entry and hidden, which is what a LUT sized from the plane's own maximum does
+        with it, and it needs no mask plane read: sizing from the planes would decode
+        every gated channel's plane during Load.
+        """
+        labels = self.quant.labels
+        size = int(labels.max()) + 1 if labels.size else 0
+        cofactor = float(self.cofactor_box.value())
+        for index, channel in enumerate(self.quant.channels):
+            stored = self.table.get(self.tile.stem, channel)
+            if not np.isfinite(stored):
+                continue
+            values = np.asarray(self.quant.column(channel), dtype=float)
+            if (self.tile.stem, channel) not in self.raw_pairs:
+                values = _core.transform(values, cofactor)
+            self.labels.set_lut(index, _core.keep_lut(labels, values, stored, size))
 
     def _add_layers(self) -> None:
         """Replace this widget's layers with the loaded tile's.
@@ -688,8 +897,7 @@ class GatingControls(QWidget):
     @property
     def channel_index(self) -> int:
         """Index into the quantification's channels; -1 on the DAPI plane."""
-        offset = self.mask_info.plane_offset if self.mask_info is not None else 0
-        return self.plane_index - offset
+        return self.plane_index - self.dapi_planes
 
     @property
     def channel(self) -> str | None:
@@ -699,7 +907,16 @@ class GatingControls(QWidget):
         return self.quant.channels[self.channel_index]
 
     def transformed(self, channel: str) -> np.ndarray:
-        """arcsinh-transformed intensities for one channel, cached per cofactor."""
+        """Intensities for one channel in the current display space, cached.
+
+        `arcsinh(x / cofactor)` normally, cached per cofactor; the raw quantification
+        while "no arcsinh" is ticked.
+        """
+        if self.raw_mode:
+            key = f"{channel}@raw"
+            if key not in self._transformed:
+                self._transformed[key] = np.asarray(self.quant.column(channel), dtype=float)
+            return self._transformed[key]
         key = f"{channel}@{self.cofactor_box.value():g}"
         if key not in self._transformed:
             self._transformed[key] = _core.transform(
@@ -764,6 +981,14 @@ class GatingControls(QWidget):
         true_lo, true_hi = _core.channel_range(values)
         lo, hi = widen_to_decimals(true_lo, true_hi, self.value_box.decimals())
         stored = self.table.get(self.tile.stem, channel)
+        # A stored value is raw or arcsinh depending on how it was set; show it in
+        # whichever space the tick box currently selects. Same cells either way.
+        stored = _core.convert_threshold(
+            stored,
+            from_raw=(self.tile.stem, channel) in self.raw_pairs,
+            to_raw=self.raw_mode,
+            cofactor=float(self.cofactor_box.value()),
+        )
         gated = bool(np.isfinite(stored))
         value = float(stored) if gated else lo
 
@@ -773,7 +998,10 @@ class GatingControls(QWidget):
         self.slider.setValue(self._to_slider(value, lo, hi))
         self._syncing = False
         self._range = (lo, hi)
-        self.range_label.setText(f"range {true_lo:.4f} … {true_hi:.4f}")
+        self.range_label.setText(
+            f"range {true_lo:.4f} … {true_hi:.4f}"
+            + ("  (raw mean intensity)" if self.raw_mode else "")
+        )
 
         # The mask layer is 2D and never re-sliced by napari, so its buffer has to be
         # refilled for the newly selected channel.
@@ -889,6 +1117,27 @@ class GatingControls(QWidget):
         self._syncing = False
         self._update_kde()
 
+    @property
+    def raw_mode(self) -> bool:
+        """True while "no arcsinh" is ticked: slider, box, plot and CSV value are raw."""
+        return self.no_arcsinh_box.isChecked()
+
+    def _on_no_arcsinh(self, checked: bool) -> None:
+        """Switch slider, value box, plot and the value Run stores between spaces."""
+        self.cofactor_box.setEnabled(not checked)
+        self.thr_box.setTitle("intensity threshold" if checked else "arcsinh threshold")
+        self.slider.setToolTip(
+            "Range is this channel's own min..max in raw mean intensity, per tile."
+            if checked else
+            "Range is this channel's own min..max in arcsinh space, per tile."
+        )
+        if checked:
+            self.cofactor_warning.setVisible(False)  # the cofactor is not in use
+            if self.quant is not None:
+                self._refresh_for_channel()
+        else:
+            self._on_cofactor(self.cofactor_box.value())  # warning back if it applies
+
     def _on_cofactor(self, value: float) -> None:
         warning = "" if value == 1 else (
             "⚠ the downstream analysis assumes cofactor 1; thresholds saved with another "
@@ -915,6 +1164,11 @@ class GatingControls(QWidget):
         self._redraw_labels()
 
         self.table.set(self.tile.stem, channel, threshold)
+        pair = (self.tile.stem, channel)
+        if self.raw_mode:
+            self.raw_pairs.add(pair)
+        else:
+            self.raw_pairs.discard(pair)
         self.save_thresholds()  # a failure to write raises a dialog of its own
         self._update_kde()
         self._update_status()
@@ -926,6 +1180,7 @@ class GatingControls(QWidget):
         self.labels.set_lut(self.channel_index, None)
         self._redraw_labels()
         self.table.clear(self.tile.stem, self.channel)
+        self.raw_pairs.discard((self.tile.stem, self.channel))
         self.save_thresholds()
         self._refresh_for_channel()  # ends in _update_status()
 
@@ -935,6 +1190,12 @@ class GatingControls(QWidget):
         return {
             "cofactor": float(self.cofactor_box.value()),
             "transform": "arcsinh(x / cofactor)",
+            # thresholds set with "no arcsinh" ticked are raw mean intensity; every
+            # other finite value in the CSV is arcsinh(x / cofactor)
+            "raw_space": sorted(
+                [list(p) for p in self.raw_pairs if np.isfinite(self.table.get(*p))]
+            ),
+            "raw_space_transform": "x (raw mean intensity, no arcsinh)",
             "tiles_dir": self._path("tiles"),
             "quant_dir": self._path("quant"),
             "masks_dir": self._path("masks"),
@@ -980,7 +1241,19 @@ class GatingControls(QWidget):
                 return
 
         out_path = Path(out_dir) / f"{self.tile.stem}_gated_mask.tif"
-        n_planes = self.mask_info.n_planes
+        # One output plane per plane of the *tile*: DAPI's slot (empty, as the
+        # downstream analysis writes it) then one per marker. For this study's masks
+        # that is the source layout unchanged; for a shared label image it is every
+        # marker's gating of the same objects, which is the only export that says
+        # anything per channel.
+        n_planes = len(self.quant.channels) + self.dapi_planes
+        luts, source_planes = {}, {}
+        for channel in range(len(self.quant.channels)):
+            out_plane = channel + self.dapi_planes
+            source_planes[out_plane] = self.labels.plane_of(channel)
+            lut = self.labels.lut(channel)
+            if lut is not None:
+                luts[out_plane] = lut
         dialog = QProgressDialog("Exporting gated mask…", "Cancel", 0, n_planes, self)
         dialog.setWindowModality(Qt.WindowModal)
 
@@ -990,8 +1263,9 @@ class GatingControls(QWidget):
 
         try:
             written, empty = _core.export_gated_mask(
-                self.tile.mask, out_path, self.labels.luts_by_plane(),
+                self.tile.mask, out_path, luts,
                 n_planes=n_planes, compression="zlib", progress=progress,
+                source_planes=source_planes,
             )
         except Exception as exc:  # noqa: BLE001
             dialog.close()
@@ -1018,6 +1292,7 @@ class GatingControls(QWidget):
             float(self.value_box.value()),
             float(self.cofactor_box.value()),
             gated=self.labels.lut(self.channel_index) is not None,
+            raw=self.raw_mode,
         )
 
     def _update_status(self) -> None:
