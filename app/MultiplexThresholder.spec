@@ -22,6 +22,7 @@ which builds the whole GUI headless and asserts that the KDE canvas, the compile
 decoders and npe2 discovery all survived the freeze (`_app.py`).
 """
 
+import importlib.util
 import sys
 import tomllib
 from pathlib import Path
@@ -71,6 +72,16 @@ for package in (
     "dask",
 ):
     collect(package)
+
+# napari 0.10 moved its logos and fonts into a separate distribution, napari-resources,
+# and reads them while `napari.viewer` is being imported, through
+# `importlib.resources.files("napari_resources.resources.logos")`. Those folders hold
+# only .svg and .ttf files and no Python module, so PyInstaller's analysis bundles
+# `napari_resources/__init__.py` and none of what it points at, and the frozen app stops
+# with "No module named 'napari_resources.resources'" before a viewer exists.
+# Collected only when present: napari 0.8 and earlier have no such package.
+if importlib.util.find_spec("napari_resources") is not None:
+    collect("napari_resources")
 
 # npe2 finds plugins through `importlib.metadata` entry points, which exist only if the
 # matching `.dist-info` directory is inside the bundle. Without this the app still opens
